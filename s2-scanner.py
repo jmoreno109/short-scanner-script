@@ -139,7 +139,6 @@ def run_scanner():
 
             rv = calculate_relative_volume(df)
 
-            #funding = market_data[symbol]["funding"]
             funding = market_data[symbol]["funding"] * 100
 
             oi = market_data[symbol]["open_interest"]
@@ -172,7 +171,6 @@ def run_scanner():
             print(
                 f"{item['symbol']:<10} "
                 f"RSI: {item['rsi']:<6}   "
-                #f"Funding: {item['funding']:<10.6f} "
                 f"Funding: {item['funding']:<8.4f}   "
                 f"OI: {item['oi']:<15,.0f} "
                 f"RVOL: {item['rv']}x     "

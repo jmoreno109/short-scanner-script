@@ -2,15 +2,22 @@ import requests
 import pandas as pd
 from ta.momentum import RSIIndicator
 import time
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--rsi", type=float, default=70)
+args = parser.parse_args()
+RSI_THRESHOLD = args.rsi
 
 BASE_URL = "https://api.hyperliquid.xyz/info"
-
 RSI_PERIOD = 14
 VOL_WINDOW = 20
-RSI_THRESHOLD = 65
 REQUEST_DELAY = 0.25
 
 
+# =========================
+# Obtener mercados
+# =========================
 def get_markets():
     payload = {"type": "meta"}
 
@@ -24,6 +31,9 @@ def get_markets():
     return [asset["name"] for asset in data["universe"]]
 
 
+# =========================
+# Obtener candles
+# =========================
 def get_candles(symbol, interval="3d", limit=200):
     payload = {
         "type": "candleSnapshot",
@@ -47,11 +57,17 @@ def get_candles(symbol, interval="3d", limit=200):
     return df
 
 
+# =========================
+# Calcular RSI
+# =========================
 def calculate_rsi(df, period=RSI_PERIOD):
     rsi = RSIIndicator(close=df["close"], window=period)
     return rsi.rsi().iloc[-1]
 
 
+# =========================
+# Obtener funding y Open Interest
+# =========================
 def get_market_data():
     payload = {"type": "metaAndAssetCtxs"}
 
@@ -70,18 +86,23 @@ def get_market_data():
     for asset, ctx in zip(universe, contexts):
         symbol = asset["name"]
         funding = float(ctx.get("funding", 0))
-        open_interest = float(ctx.get("openInterest", 0))
         volume_24h = float(ctx.get("dayNtlVlm", 0))
+        open_interest = float(ctx.get("openInterest", 0))
+        price = float(ctx.get("markPx", 0))
+        oi_usd = open_interest * price
 
         market_data[symbol] = {
             "funding": funding,
-            "open_interest": open_interest,
+            "open_interest": oi_usd,
             "volume_24h": volume_24h,
         }
 
     return market_data
 
 
+# =========================
+# Calcular volumen relativo
+# =========================
 def calculate_relative_volume(df):
     volume = df["v"].astype(float)
     current_volume = volume.iloc[-1]
@@ -93,6 +114,22 @@ def calculate_relative_volume(df):
     return current_volume / average_volume
 
 
+# =========================
+# Obtiene K/M/B automático
+# =========================
+def format_number(num):
+    if num >= 1_000_000_000:
+        return f"{num/1_000_000_000:.1f}B"
+    elif num >= 1_000_000:
+        return f"{num/1_000_000:.1f}M"
+    elif num >= 1_000:
+        return f"{num/1_000:.1f}K"
+    return str(num)
+
+
+# =========================
+# Scanner principal
+# =========================
 def run_scanner():
     markets = get_markets()
     market_data = get_market_data()
@@ -116,6 +153,7 @@ def run_scanner():
             oi = market_data.get(symbol, {}).get("open_interest", 0)
             volume_24h = market_data.get(symbol, {}).get("volume_24h", 0)
 
+            #oi > 10_000_000 and volume_24h > 1_000_000 and rv > 0.8
             if rsi > RSI_THRESHOLD and oi > 0:
                 results.append(
                     {
@@ -145,11 +183,11 @@ def run_scanner():
         for item in results:
             print(
                 f"{item['symbol']:<10} "
-                f"RSI: {item['rsi']:<6}   "
-                f"Funding: {item['funding']:<8.4f}   "
-                f"OI: {item['oi']:<15,.0f} "
-                f"RVOL: {item['rv']}x     "
-                f"Vol24h: ${item['volume_24h']:,.0f}"
+                f"RSI: {item['rsi']:>6.2f}   "
+                f"Funding: {item['funding']:>8.4f}   "
+                f"OI: ${format_number(item['oi']):>8}   "
+                f"RVOL: {item['rv']:>5.2f}x   "
+                f"Vol24h: ${format_number(item['volume_24h']):>8}"
             )
 
     print("=" * 100)

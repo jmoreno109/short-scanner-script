@@ -5,12 +5,41 @@
 #AND OI_change_24h > 10%
 #AND volume > average
 
-# Caso más favorable
+# Caso más favorable Setup Short 2
 # RSI alto
 # RVOL debajo de 1
 # funding positivo
 # precio extendido
 # OI alto
+
+# < 5M USD | Muy bajo | Generalmente basura.
+# 5M - 20M  | Bajo | Altcoins pequeñas.
+# 20M - 100M | Decente | Ya operable.
+# 100M - 500M | Bueno | Empieza a ser interesante.
+# 500M - 1B+ | Muy fuerte | Mercado muy activo.
+
+# CASO 1
+# Precio ↑ + OI ↑
+# Muy bullish.
+# Significa:
+# entran nuevos longs,
+# expansión de posiciones,
+# tendencia fuerte.
+
+# CASO 2
+# Precio ↑ + OI ↓
+# Short covering.
+# Subida menos sostenible.
+
+# CASO 3
+# Precio ↓ + OI ↑
+# Nuevos shorts entrando.
+# Bearish/agresivo.
+
+# CASO 4
+# Precio ↓ + OI ↓
+# Capitulación/flush.
+
 
 import requests
 import pandas as pd
