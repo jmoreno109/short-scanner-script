@@ -17,7 +17,6 @@ REQUEST_DELAY = 0.25
 HISTORY_RETENTION_SECONDS = 604800 # 7 days
 #HISTORY_RETENTION_SECONDS = 2592000 # 30 days
 
-
 DB_NAME = "scanner.db"
 conn = sqlite3.connect(DB_NAME)
 cursor = conn.cursor()
@@ -90,13 +89,6 @@ def get_oi_delta(symbol, current_oi):
 # Limpiar histórico viejo
 # =========================
 def cleanup_old_data():
-
-    # cursor.execute(
-    #     """
-    #     DELETE FROM oi_history
-    #     WHERE timestamp < strftime('%s','now') - {HISTORY_RETENTION_SECONDS}
-    #     """
-    # )
 
     cursor.execute(
         """
@@ -222,7 +214,7 @@ def format_number(num):
     return f"{num:,.0f}"
 
 # =========================
-# un “classifier” 
+# Classifier v1 
 # =========================
 def classify_trade(rsi, funding, rv, oi_delta):
     # 🔥 SHORT fuerte
@@ -246,7 +238,7 @@ def classify_trade(rsi, funding, rv, oi_delta):
 
 
 # =========================
-# un “classifier” 2
+# Classifier v2
 # =========================
 def classify_trade2(rsi, funding, rv, oi_delta):
     
@@ -277,11 +269,165 @@ def classify_trade2(rsi, funding, rv, oi_delta):
 
 
 # =========================
+# score multi-factor + quant system básico
+# =========================
+# def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
+
+#     score = 0
+
+#     # RSI
+#     if rsi >= 75:
+#         score += 3
+#     elif rsi >= 70:
+#         score += 2
+#     elif rsi >= 65:
+#         score += 1
+
+#     # Funding (crowded longs = bearish)
+#     if funding > 0.01:
+#         score += 2
+#     elif funding > 0:
+#         score += 1
+#     elif funding < -0.02:
+#         score -= 2   # squeeze risk (peligro)
+
+#     # Open Interest (liquidez)
+#     if oi > 10_000_000:
+#         score += 1
+
+#     # OI Delta (flujo)
+#     if oi_delta > 1:
+#         score += 2
+#     elif oi_delta < -1:
+#         score += 1
+
+#     # RVOL (debilidad o exceso)
+#     if rvol < 0.5:
+#         score += 2   # debilidad → bueno para short
+#     elif rvol > 1.5:
+#         score -= 1   # momentum fuerte contra short
+
+#     # volumen (confirmación de interés)
+#     if volume_24h > 1_000_000:
+#         score += 1
+
+#     return score
+
+
+# ========================================
+# Score multi-factor + quant system básico
+# ========================================
+def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
+
+    score = 0
+
+    # =====================
+    # 1. BIAS (lo más importante)
+    # =====================
+
+    if rsi >= 75:
+        score += 4
+    elif rsi >= 70:
+        score += 3
+    elif rsi >= 65:
+        score += 1
+    else:
+        score -= 1   # neutral o bearish invalida short fuerte
+
+    if funding > 0.01:
+        score += 2
+    elif funding > 0:
+        score += 1
+    elif funding < -0.02:
+        score -= 2   # squeeze risk
+
+    # =====================
+    # 2. CONFIRMACIÓN
+    # =====================
+
+    # OI delta SOLO si hay dirección
+    if oi_delta > 1 and rsi >= 70:
+        score += 2
+    elif oi_delta > 1 and rsi < 60:
+        score += 0   # neutro (no señal)
+
+    if rvol < 0.5 and rsi >= 70:
+        score += 2   # debilidad real en sobrecompra
+    elif rvol < 0.5:
+        score += 0.5  # leve ajuste, no fuerte
+
+    elif rvol > 1.5:
+        score -= 1
+
+    # =====================
+    # 3. CONTEXTO
+    # =====================
+
+    if oi > 10_000_000 and rsi >= 70:
+        score += 1
+
+    if volume_24h > 1_000_000:
+        score += 0.5
+
+    return score
+
+# def classify_from_score(score): 
+
+#     if score >= 7:
+#         return "🔥 STRONG SHORT"
+
+#     if 4 <= score < 7:
+#         return "🎯 SHORT SETUP" #--🧠
+
+#     if 2 <= score < 4:
+#         return "⚠️ WEAK EDGE"
+
+#     return "❌ NO TRADE"
+
+
+# def classify_from_score(score, rsi, funding):
+
+#     # STRONG SHORT (ahora con confluencia real)
+#     if score >= 7 and rsi >= 72 and funding > 0:
+#         return "🔥"
+
+#     if 4 <= score < 7:
+#         return "🎯" 
+
+#     if 2 <= score < 4:
+#         return "⚠️"
+
+#     return "❌"
+
+
+def classify_from_score(score, rsi, funding, rvol, oi_delta):
+
+    # 🔥 STRONG SHORT (confluencia real)
+    if (
+        score >= 7 and
+        rsi >= 72 and
+        funding > 0 and
+        rvol < 0.8 and
+        oi_delta > 0
+    ):
+        return "🔥"
+
+    # ⚠️ SHORT SETUP
+    if 4 <= score < 7:
+        return "🎯"
+
+    # ⚠️ WEAK EDGE
+    if 2 <= score < 4:
+        return "⚠️"
+
+    return "❌"
+
+# =========================
 # Scanner principal
 # =========================
 def run_scanner():
 
-    cleanup_old_data() #---------------------
+    cleanup_old_data()
 
     markets = get_markets()
     market_data = get_market_data()
@@ -303,14 +449,16 @@ def run_scanner():
             rv = calculate_relative_volume(df)
             funding = market_data.get(symbol, {}).get("funding", 0) * 100
             oi = market_data.get(symbol, {}).get("open_interest", 0)
-
-            oi_delta = get_oi_delta(symbol, oi) #------
-            save_oi_snapshot(symbol, oi) #------
-
-
+            oi_delta = get_oi_delta(symbol, oi)
+            save_oi_snapshot(symbol, oi)
             volume_24h = market_data.get(symbol, {}).get("volume_24h", 0)
 
-            signal = classify_trade(rsi, funding, rv, oi_delta) #--------------------
+            score = compute_short_score(rsi, funding, oi, oi_delta, rv, volume_24h)
+
+            #signal = classify_from_score(score)
+            #signal = classify_from_score(score, rsi, funding)
+            signal = classify_from_score(score, rsi, funding, rv, oi_delta)
+
 
             #oi > 10_000_000 and volume_24h > 1_000_000 and rv > 0.8
             if rsi > RSI_THRESHOLD and oi > 0:
@@ -322,8 +470,9 @@ def run_scanner():
                         "oi": oi,
                         "volume_24h": volume_24h,
                         "rv": round(rv, 2),
-                        "oi_delta": round(oi_delta, 2), #------------
-                        "signal": signal,   #------------
+                        "oi_delta": round(oi_delta, 2), 
+                        "score": score, 
+                        "signal": signal,
                     }
                 )
 
@@ -345,11 +494,12 @@ def run_scanner():
             print(
                 f"{item['symbol']:<7} "
                 f"RSI: {item['rsi']:>6.2f}  "
-                f"Funding: {item['funding']:>8.4f}  "
+                f"FUND: {item['funding']:>8.4f}  "
                 f"OI: ${format_number(item['oi']):>8}  "
                 f"OIΔ: {item['oi_delta']:>6.2f}%  "
-                f"RVOL: {item['rv']:>5.2f}x  "
-                f"Vol24h: ${format_number(item['volume_24h']):>8}  "
+                f"RVOL: {item['rv']:>5.2f}x  "                
+                f"Vol24h: ${format_number(item['volume_24h']):>8}  "                
+                f"SCORE: {item['score']:>4.1f}  "
                 f"{item['signal']}"
             )
 
