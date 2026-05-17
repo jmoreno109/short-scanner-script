@@ -1,0 +1,17 @@
+# Virtual environments
+venv/
+env/
+hlbot/
+
+# Python
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
