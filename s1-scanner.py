@@ -41,6 +41,19 @@
 # Capitulación/flush.
 
 
+# 🔴 Posible SHORT SQUEEZE (para ti importante)
+# Esto es lo que te interesa si haces shorts:
+# Funding MUY negativo ❄️
+# 👉 demasiados shorts abiertos
+# OI subiendo fuerte 📈
+# 👉 mucha gente entrando en posiciones
+# Precio no cae (o sube lento)
+# 👉 los shorts están “equivocados”
+# RVOL empieza a subir
+# 👉 Esto significa:
+# “Hay muchos shorts atrapados → riesgo de subida violenta”
+
+
 import requests
 import pandas as pd
 from ta.momentum import RSIIndicator

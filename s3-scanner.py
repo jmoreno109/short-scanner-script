@@ -3,6 +3,7 @@ import pandas as pd
 from ta.momentum import RSIIndicator
 import time
 import argparse
+import sqlite3
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--rsi", type=float, default=70)
@@ -13,6 +14,99 @@ BASE_URL = "https://api.hyperliquid.xyz/info"
 RSI_PERIOD = 14
 VOL_WINDOW = 20
 REQUEST_DELAY = 0.25
+HISTORY_RETENTION_SECONDS = 604800 # 7 days
+#HISTORY_RETENTION_SECONDS = 2592000 # 30 days
+
+
+DB_NAME = "scanner.db"
+conn = sqlite3.connect(DB_NAME)
+cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS oi_history (
+    symbol TEXT,
+    timestamp INTEGER,
+    oi REAL
+)
+""")
+conn.commit()
+
+# =========================
+# Guardar snapshot OI
+# =========================
+def save_oi_snapshot(symbol, oi):
+
+    cursor.execute(
+        """
+        INSERT INTO oi_history (symbol, timestamp, oi)
+        VALUES (?, strftime('%s','now'), ?)
+        """,
+        (symbol, oi),
+    )
+
+    conn.commit()
+
+# =========================
+# Calcular OI Delta
+# =========================
+def get_oi_delta(symbol, current_oi):
+
+    # cursor.execute(
+    #     """
+    #     SELECT oi
+    #     FROM oi_history
+    #     WHERE symbol = ?
+    #     AND timestamp <= strftime('%s','now') - 3600
+    #     ORDER BY timestamp DESC
+    #     LIMIT 1
+    #     """,
+    #     (symbol,),
+    # )
+
+    cursor.execute(
+        """
+        SELECT oi
+        FROM oi_history
+        WHERE symbol = ?
+        ORDER BY timestamp DESC
+        LIMIT 1 OFFSET 1
+        """,
+        (symbol,),
+    )
+
+    row = cursor.fetchone()
+
+    if not row:
+        return 0
+
+    previous_oi = row[0]
+
+    if previous_oi == 0:
+        return 0
+
+    return ((current_oi - previous_oi) / previous_oi) * 100
+
+
+# =========================
+# Limpiar histórico viejo
+# =========================
+def cleanup_old_data():
+
+    # cursor.execute(
+    #     """
+    #     DELETE FROM oi_history
+    #     WHERE timestamp < strftime('%s','now') - {HISTORY_RETENTION_SECONDS}
+    #     """
+    # )
+
+    cursor.execute(
+        """
+        DELETE FROM oi_history
+        WHERE timestamp < strftime('%s','now') - ?
+        """,
+        (HISTORY_RETENTION_SECONDS,)
+    )
+
+    conn.commit()
 
 
 # =========================
@@ -124,13 +218,71 @@ def format_number(num):
         return f"{num/1_000_000:.1f}M"
     elif num >= 1_000:
         return f"{num/1_000:.1f}K"
-    return str(num)
+    #return str(num)
+    return f"{num:,.0f}"
+
+# =========================
+# un “classifier” 
+# =========================
+def classify_trade(rsi, funding, rv, oi_delta):
+    # 🔥 SHORT fuerte
+    if rsi >= 70 and funding > 0 and rv < 0.8:
+        return "🔥 SHORT"
+
+    # 🔥 SHORT por sobreextensión + debilidad
+    if rsi >= 72 and rv < 1:
+        return "🔥 SHORT"
+
+    # ⚠️ zona peligrosa (no confirmación)
+    if 65 <= rsi < 70:
+        return "⚠️ WATCH"
+
+    # ⚠️ funding muy negativo (posible squeeze primero)
+    if funding < -0.02:
+        return "⚠️ WATCH (p.squeeze)"
+
+    # ❌ sin setup
+    return "❌ NO TRADE"
+
+
+# =========================
+# un “classifier” 2
+# =========================
+def classify_trade2(rsi, funding, rv, oi_delta):
+    
+    # 🔴 SHORT SQUEEZE RISK (peligro para shorts)
+    # hay demasiados shorts → el precio puede subir violentamente primero
+    if rsi < 65 and funding < -0.02 and oi_delta > 1:
+        return "⚠️ SHORT SQUEEZE RISK"
+
+    # 🟢 LONG SQUEEZE RISK (peligro para longs)
+    # mercado sobrecargado de longs → posible dump violento
+    if rsi > 75 and funding > 0.01 and oi_delta > 1:
+        return "⚠️ LONG SQUEEZE RISK"
+
+    # 🔥 SHORT fuerte
+    if rsi >= 70 and funding > 0 and rv < 0.8:
+        return "🔥 SHORT"
+
+    # 🔥 SHORT por sobreextensión
+    if rsi >= 72 and rv < 1:
+        return "🔥 SHORT (weak vol)"
+
+    # ⚠️ zona neutral / transición
+    if 65 <= rsi < 70:
+        return "⚠️ WATCH"
+
+    # ❌ sin edge
+    return "❌ NO TRADE"
 
 
 # =========================
 # Scanner principal
 # =========================
 def run_scanner():
+
+    cleanup_old_data() #---------------------
+
     markets = get_markets()
     market_data = get_market_data()
     results = []
@@ -151,7 +303,14 @@ def run_scanner():
             rv = calculate_relative_volume(df)
             funding = market_data.get(symbol, {}).get("funding", 0) * 100
             oi = market_data.get(symbol, {}).get("open_interest", 0)
+
+            oi_delta = get_oi_delta(symbol, oi) #------
+            save_oi_snapshot(symbol, oi) #------
+
+
             volume_24h = market_data.get(symbol, {}).get("volume_24h", 0)
+
+            signal = classify_trade(rsi, funding, rv, oi_delta) #--------------------
 
             #oi > 10_000_000 and volume_24h > 1_000_000 and rv > 0.8
             if rsi > RSI_THRESHOLD and oi > 0:
@@ -163,6 +322,8 @@ def run_scanner():
                         "oi": oi,
                         "volume_24h": volume_24h,
                         "rv": round(rv, 2),
+                        "oi_delta": round(oi_delta, 2), #------------
+                        "signal": signal,   #------------
                     }
                 )
 
@@ -175,22 +336,24 @@ def run_scanner():
 
     results = sorted(results, key=lambda x: x["rsi"], reverse=True)
 
-    print("=" * 100)
+    print("=" * 115)
 
     if not results:
         print(f"\nNo hay activos con RSI > {RSI_THRESHOLD}")
     else:
         for item in results:
             print(
-                f"{item['symbol']:<10} "
-                f"RSI: {item['rsi']:>6.2f}   "
-                f"Funding: {item['funding']:>8.4f}   "
-                f"OI: ${format_number(item['oi']):>8}   "
-                f"RVOL: {item['rv']:>5.2f}x   "
-                f"Vol24h: ${format_number(item['volume_24h']):>8}"
+                f"{item['symbol']:<7} "
+                f"RSI: {item['rsi']:>6.2f}  "
+                f"Funding: {item['funding']:>8.4f}  "
+                f"OI: ${format_number(item['oi']):>8}  "
+                f"OIΔ: {item['oi_delta']:>6.2f}%  "
+                f"RVOL: {item['rv']:>5.2f}x  "
+                f"Vol24h: ${format_number(item['volume_24h']):>8}  "
+                f"{item['signal']}"
             )
 
-    print("=" * 100)
+    print("=" * 115)
 
 
 if __name__ == "__main__":
