@@ -319,12 +319,31 @@ def classify_trade2(rsi, funding, rv, oi_delta):
 # ========================================
 def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
 
+    # =====================
+    # 1. LIQUIDITY GATE (FILTRO DURO)
+    # =====================
+
+    if volume_24h < 500_000:
+        return -5  # basura / no tradear
+
     score = 0
 
     # =====================
-    # 1. BIAS (lo más importante)
+    # 2. RISK (estructura de liquidez) (OI / VOL)
     # =====================
 
+    oi_vol_ratio = oi / volume_24h
+
+    if oi_vol_ratio > 5:
+        score -= 2      # high leverage / low liquidity
+    elif oi_vol_ratio > 2:
+        score -= 1      # speculative
+
+    # =====================
+    # 3. BIAS (lo más importante)
+    # =====================
+
+    # RSI EXTREMO
     if rsi >= 75:
         score += 4
     elif rsi >= 70:
@@ -332,40 +351,78 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
     elif rsi >= 65:
         score += 1
     else:
-        score -= 1   # neutral o bearish invalida short fuerte
+        score -= 1   # no hay sobrecompra real
 
-    if funding > 0.01:
+    # FUNDING
+    if funding > 0.03 and rsi >= 70:
+        score += 3   # euforia extrema
+    elif funding > 0.01:
         score += 2
     elif funding > 0:
         score += 1
     elif funding < -0.02:
-        score -= 2   # squeeze risk
+        score -= 2   # riesgo de short squeeze
 
     # =====================
-    # 2. CONFIRMACIÓN
+    # 4. CONFIRMACIÓN
     # =====================
 
-    # OI delta SOLO si hay dirección
+    # OI DELTA (crowding) SOLO si hay dirección
     if oi_delta > 1 and rsi >= 70:
         score += 2
     elif oi_delta > 1 and rsi < 60:
         score += 0   # neutro (no señal)
 
+    # RVOL BAJO = agotamiento
     if rvol < 0.5 and rsi >= 70:
-        score += 2   # debilidad real en sobrecompra
+        score += 2    # debilidad real en sobrecompra
     elif rvol < 0.5:
         score += 0.5  # leve ajuste, no fuerte
 
+    # RVOL MUY ALTO = momentum continuation
     elif rvol > 1.5:
         score -= 1
 
+    # OI DELTA (crowding)
+    # if oi_delta > 5 and rsi >= 70:
+    #     score += 3
+    # elif oi_delta > 2 and rsi >= 70:
+    #     score += 2
+
+    # # RVOL BAJO = agotamiento
+    # if rvol < 0.6 and rsi >= 70:
+    #     score += 2
+    # elif rvol < 0.8:
+    #     score += 1
+
+    # # RVOL ALTO = continuación
+    # elif rvol > 1.8:
+    #     score -= 2
+    # elif rvol > 1.5:
+    #     score -= 1
+
+
     # =====================
-    # 3. CONTEXTO
+    # 5 MOMENTUM EXPANSION 
     # =====================
 
+    # Expansión "sana" -> crowding
+    if oi_delta > 5 and 0.6 <= rvol <= 1.2 and rsi >= 60:
+        score += 1.5
+
+    # Expansión agresiva -> peligro short
+    if oi_delta > 5 and rvol > 1.5:
+        score -= 2
+
+    # =====================
+    # 6. CONTEXTO
+    # =====================
+
+    # Mucho OI en sobrecompra
     if oi > 10_000_000 and rsi >= 70:
         score += 1
 
+    # Liquidez suficiente
     if volume_24h > 1_000_000:
         score += 0.5
 
@@ -403,24 +460,38 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
 def classify_from_score(score, rsi, funding, rvol, oi_delta):
 
     # 🔥 STRONG SHORT (confluencia real)
-    if (
-        score >= 7 and
-        rsi >= 72 and
-        funding > 0 and
-        rvol < 0.8 and
-        oi_delta > 0
-    ):
-        return "🔥"
+    # if score >= 7 and rsi >= 72 and funding > 0 and rvol < 0.8 and oi_delta > 0 :
+    if score >= 7 and rsi >= 72 and funding > 0:
+        return "🟢"
+
+    # ⚠️ SHORT SETUP
+    if score >= 7:
+        return "🟡"
 
     # ⚠️ SHORT SETUP
     if 4 <= score < 7:
-        return "🎯"
+        return "🟡"
 
     # ⚠️ WEAK EDGE
     if 2 <= score < 4:
-        return "⚠️"
+        return "🟡"
 
-    return "❌"
+    return "🔴"
+
+
+def get_risk_label(oi, volume_24h):
+
+    if volume_24h == 0:
+        return "⚫" #NO LIQUIDITY
+
+    oi_vol_ratio = oi / volume_24h
+
+    if oi_vol_ratio > 5:
+        return "🔴" #HIGH LEVERAGE
+    elif oi_vol_ratio > 2:
+        return "🟡" #SPECULATIVE
+    else:
+        return "🟢" #HEALTHY
 
 # =========================
 # Scanner principal
@@ -459,6 +530,8 @@ def run_scanner():
             #signal = classify_from_score(score, rsi, funding)
             signal = classify_from_score(score, rsi, funding, rv, oi_delta)
 
+            risk_label = get_risk_label(oi, volume_24h)
+
 
             #oi > 10_000_000 and volume_24h > 1_000_000 and rv > 0.8
             if rsi > RSI_THRESHOLD and oi > 0:
@@ -473,6 +546,7 @@ def run_scanner():
                         "oi_delta": round(oi_delta, 2), 
                         "score": score, 
                         "signal": signal,
+                        "risk_label": risk_label,
                     }
                 )
 
@@ -485,7 +559,7 @@ def run_scanner():
 
     results = sorted(results, key=lambda x: x["rsi"], reverse=True)
 
-    print("=" * 115)
+    print("=" * 120)
 
     if not results:
         print(f"\nNo hay activos con RSI > {RSI_THRESHOLD}")
@@ -497,13 +571,16 @@ def run_scanner():
                 f"FUND: {item['funding']:>8.4f}  "
                 f"OI: ${format_number(item['oi']):>8}  "
                 f"OIΔ: {item['oi_delta']:>6.2f}%  "
-                f"RVOL: {item['rv']:>5.2f}x  "                
-                f"Vol24h: ${format_number(item['volume_24h']):>8}  "                
-                f"SCORE: {item['score']:>4.1f}  "
-                f"{item['signal']}"
+                f"RVOL: {item['rv']:>5.2f}x  "   
+
+                #f"Vol24h: ${format_number(item['volume_24h']):>8}  "  
+                f"Vol24h({item['risk_label']}): ${format_number(item['volume_24h']):>8}  "
+
+                f"Score({item['signal']}): {item['score']:>4.1f}  "
+                #f"{item['signal']}"
             )
 
-    print("=" * 115)
+    print("=" * 120)
 
 
 if __name__ == "__main__":
