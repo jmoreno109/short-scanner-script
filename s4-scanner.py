@@ -216,107 +216,6 @@ def format_number(num):
     return f"{num:,.0f}"
 
 
-# =========================
-# Classifier v1
-# =========================
-def classify_trade(rsi, funding, rv, oi_delta):
-    # 🔥 SHORT fuerte
-    if rsi >= 70 and funding > 0 and rv < 0.8:
-        return "🔥 SHORT"
-
-    # 🔥 SHORT por sobreextensión + debilidad
-    if rsi >= 72 and rv < 1:
-        return "🔥 SHORT"
-
-    # ⚠️ zona peligrosa (no confirmación)
-    if 65 <= rsi < 70:
-        return "⚠️ WATCH"
-
-    # ⚠️ funding muy negativo (posible squeeze primero)
-    if funding < -0.02:
-        return "⚠️ WATCH (p.squeeze)"
-
-    # ❌ sin setup
-    return "❌ NO TRADE"
-
-
-# =========================
-# Classifier v2
-# =========================
-def classify_trade2(rsi, funding, rv, oi_delta):
-
-    # 🔴 SHORT SQUEEZE RISK (peligro para shorts)
-    # hay demasiados shorts → el precio puede subir violentamente primero
-    if rsi < 65 and funding < -0.02 and oi_delta > 1:
-        return "⚠️ SHORT SQUEEZE RISK"
-
-    # 🟢 LONG SQUEEZE RISK (peligro para longs)
-    # mercado sobrecargado de longs → posible dump violento
-    if rsi > 75 and funding > 0.01 and oi_delta > 1:
-        return "⚠️ LONG SQUEEZE RISK"
-
-    # 🔥 SHORT fuerte
-    if rsi >= 70 and funding > 0 and rv < 0.8:
-        return "🔥 SHORT"
-
-    # 🔥 SHORT por sobreextensión
-    if rsi >= 72 and rv < 1:
-        return "🔥 SHORT (weak vol)"
-
-    # ⚠️ zona neutral / transición
-    if 65 <= rsi < 70:
-        return "⚠️ WATCH"
-
-    # ❌ sin edge
-    return "❌ NO TRADE"
-
-
-# =========================
-# score multi-factor + quant system básico
-# =========================
-# def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
-
-#     score = 0
-
-#     # RSI
-#     if rsi >= 75:
-#         score += 3
-#     elif rsi >= 70:
-#         score += 2
-#     elif rsi >= 65:
-#         score += 1
-
-#     # Funding (crowded longs = bearish)
-#     if funding > 0.01:
-#         score += 2
-#     elif funding > 0:
-#         score += 1
-#     elif funding < -0.02:
-#         score -= 2   # squeeze risk (peligro)
-
-#     # Open Interest (liquidez)
-#     if oi > 10_000_000:
-#         score += 1
-
-#     # OI Delta (flujo)
-#     if oi_delta > 1:
-#         score += 2
-#     elif oi_delta < -1:
-#         score += 1
-
-#     # RVOL (debilidad o exceso)
-#     if rvol < 0.5:
-#         score += 2   # debilidad → bueno para short
-#     elif rvol > 1.5:
-#         score -= 1   # momentum fuerte contra short
-
-#     # volumen (confirmación de interés)
-#     if volume_24h > 1_000_000:
-#         score += 1
-
-#     return score
-
-
 # ========================================
 # Score multi-factor + quant system básico
 # ========================================
@@ -386,24 +285,6 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
     elif rvol > 1.5:
         score -= 1
 
-    # OI DELTA (crowding)
-    # if oi_delta > 5 and rsi >= 70:
-    #     score += 3
-    # elif oi_delta > 2 and rsi >= 70:
-    #     score += 2
-
-    # # RVOL BAJO = agotamiento
-    # if rvol < 0.6 and rsi >= 70:
-    #     score += 2
-    # elif rvol < 0.8:
-    #     score += 1
-
-    # # RVOL ALTO = continuación
-    # elif rvol > 1.8:
-    #     score -= 2
-    # elif rvol > 1.5:
-    #     score -= 1
-
     # =====================
     # 5 MOMENTUM EXPANSION
     # =====================
@@ -431,57 +312,6 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
     return score
 
 
-# def classify_from_score(score):
-
-#     if score >= 7:
-#         return "🔥 STRONG SHORT"
-
-#     if 4 <= score < 7:
-#         return "🎯 SHORT SETUP" #--🧠
-
-#     if 2 <= score < 4:
-#         return "⚠️ WEAK EDGE"
-
-#     return "❌ NO TRADE"
-
-
-# def classify_from_score(score, rsi, funding):
-
-#     # STRONG SHORT (ahora con confluencia real)
-#     if score >= 7 and rsi >= 72 and funding > 0:
-#         return "🔥"
-
-#     if 4 <= score < 7:
-#         return "🎯"
-
-#     if 2 <= score < 4:
-#         return "⚠️"
-
-#     return "❌"
-
-
-def classify_from_score(score, rsi, funding, rvol, oi_delta):
-
-    # 🔥 STRONG SHORT (confluencia real)
-    # if score >= 7 and rsi >= 72 and funding > 0 and rvol < 0.8 and oi_delta > 0 :
-    if score >= 7 and rsi >= 72 and funding > 0 and rvol < 0.8:
-        return "🟢"
-
-    # ⚠️ SHORT SETUP
-    if score >= 7:
-        return "🟡"
-
-    # ⚠️ SHORT SETUP
-    if 4 <= score < 7:
-        return "🟡"
-
-    # ⚠️ WEAK EDGE
-    if 2 <= score < 4:
-        return "🟡"
-
-    return "🔴"
-
-
 def get_risk_label(oi, volume_24h):
 
     if volume_24h == 0:
@@ -497,11 +327,110 @@ def get_risk_label(oi, volume_24h):
         return "🟢"  # HEALTHY
 
 
-def get_funding_label(funding):
-    if funding > 0:
-        return "🟢"
-    else:
-        return "🔴"
+def classify_from_score1(score):
+
+    if score >= 7:
+        return "🟢 STRONG SHORT"
+
+    if 4 <= score < 7:
+        return "🟡 SHORT SETUP"
+
+    if 2 <= score < 4:
+        return "🟡 WEAK EDGE"
+
+    return "🔴 NO TRADE"
+
+
+def classify_from_score2(score, rsi, funding):
+
+    # STRONG SHORT (ahora con confluencia real)
+    if score >= 7 and rsi >= 72 and funding > 0:
+        return "🟢 STRONG SHORT"
+
+    if 4 <= score < 7:
+        return "🟡 SHORT SETUP"
+
+    if 2 <= score < 4:
+        return "🟡 WEAK EDGE"
+
+    return "🔴 NO TRADE"
+
+
+def classify_from_score3(score, rsi, funding, rvol, oi_delta):
+
+    # 🔥 STRONG SHORT (confluencia real)
+    # if score >= 7 and rsi >= 72 and funding > 0 and rvol < 0.8 and oi_delta > 0 :
+    if score >= 7 and rsi >= 72 and funding > 0 and rvol < 0.8:
+        return "🟢 STRONG SHORT"
+
+    # ⚠️ SHORT SETUP
+    if score >= 7:
+        return "🟡 SHORT SETUP"
+
+    # ⚠️ SHORT SETUP
+    if 4 <= score < 7:
+        return "🟡 SHORT SETUP"
+
+    # ⚠️ WEAK EDGE
+    if 2 <= score < 4:
+        return "🟡 WEAK EDGE"
+
+    return "🔴 NO TRADE"
+
+
+# =========================
+# Classifier v1
+# =========================
+def classify_trade1(rsi, funding, rv, oi_delta):
+    # 🔥 SHORT fuerte
+    if rsi >= 70 and funding > 0 and rv < 0.8:
+        return "🟢 STRONG SHORT"
+
+    # 🔥 SHORT por sobreextensión + debilidad
+    if rsi >= 72 and rv < 1:
+        return "🟢 STRONG SHORT"
+
+    # ⚠️ zona peligrosa (no confirmación)
+    if 65 <= rsi < 70:
+        return "🟡 WATCH"
+
+    # ⚠️ funding muy negativo (posible squeeze primero)
+    if funding < -0.02:
+        return "🟡 WATCH (p.squeeze)"
+
+    # ❌ sin setup
+    return "🔴 NO TRADE"
+
+
+# =========================
+# Classifier v2
+# =========================
+def classify_trade2(rsi, funding, rv, oi_delta):
+
+    # 🔴 SHORT SQUEEZE RISK (peligro para shorts)
+    # hay demasiados shorts → el precio puede subir violentamente primero
+    if rsi < 65 and funding < -0.02 and oi_delta > 1:
+        return "🔴 SHORT SQUEEZE RISK"
+
+    # 🟢 LONG SQUEEZE RISK (peligro para longs)
+    # mercado sobrecargado de longs → posible dump violento
+    if rsi > 75 and funding > 0.01 and oi_delta > 1:
+        return "🟢 LONG SQUEEZE RISK"
+
+    # 🔥 SHORT fuerte
+    if rsi >= 70 and funding > 0 and rv < 0.8:
+        return "🟢 STRONG SHORT"
+
+    # 🔥 SHORT por sobreextensión
+    if rsi >= 72 and rv < 1:
+        return "🟢 STRONG SHORT (weak vol)"
+
+    # ⚠️ zona neutral / transición
+    if 65 <= rsi < 70:
+        return "🟡 WATCH"
+
+    # ❌ sin edge
+    return "🔴 NO TRADE"
 
 
 # =========================
@@ -537,9 +466,12 @@ def run_scanner():
 
             score = compute_short_score(rsi, funding, oi, oi_delta, rv, volume_24h)
 
-            # signal = classify_from_score(score)
-            # signal = classify_from_score(score, rsi, funding)
-            signal = classify_from_score(score, rsi, funding, rv, oi_delta)
+            signal1 = classify_from_score1(score)
+            signal2 = classify_from_score2(score, rsi, funding)
+            signal3 = classify_from_score3(score, rsi, funding, rv, oi_delta)
+
+            class1 = classify_trade1(rsi, funding, rv, oi_delta)
+            class2 = classify_trade2(rsi, funding, rv, oi_delta)
 
             risk_label = get_risk_label(oi, volume_24h)
 
@@ -555,7 +487,11 @@ def run_scanner():
                         "rv": round(rv, 2),
                         "oi_delta": round(oi_delta, 2),
                         "score": score,
-                        "signal": signal,
+                        "signal1": signal1,
+                        "signal2": signal2,
+                        "signal3": signal3,
+                        "class1": class1,
+                        "class2": class2,
                         "risk_label": risk_label,
                     }
                 )
@@ -578,17 +514,18 @@ def run_scanner():
             print(
                 f"{item['symbol']:<7} "
                 f"RSI: {item['rsi']:>6.2f}  "
-
                 # f"FUND: {item['funding']:>8.4f}  "
-                f"Fund({get_funding_label(item['funding'])}): {item['funding']:>8.4f}  "
-
-                f"OI: ${format_number(item['oi']):>8}  "
-                f"OIΔ: {item['oi_delta']:>6.2f}%  "
-                f"RVOL: {item['rv']:>5.2f}x  "
+                # f"OI: ${format_number(item['oi']):>8}  "
+                # f"OIΔ: {item['oi_delta']:>6.2f}%  "
+                # f"RVOL: {item['rv']:>5.2f}x  "
                 # f"Vol24h: ${format_number(item['volume_24h']):>8}  "
-                f"Vol24h({item['risk_label']}): ${format_number(item['volume_24h']):>8}  "
-                f"Sco({item['signal']}): {item['score']:>4.1f}  "
-                # f"{item['signal']}"
+                # f"Vol24h({item['risk_label']}): ${format_number(item['volume_24h']):>8}  "
+                # f"Score({item['signal']}): {item['score']:>4.1f}  "
+                f"{item['signal1']:<14}  "
+                f"{item['signal2']:<14}  "
+                f"{item['signal3']:<14}  "
+                f"{item['class1']:<14}  "
+                f"{item['class2']:<14}  "
             )
 
     print("=" * 120)
