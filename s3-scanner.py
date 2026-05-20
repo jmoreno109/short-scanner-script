@@ -320,7 +320,8 @@ def classify_trade2(rsi, funding, rv, oi_delta):
 # ========================================
 # Score multi-factor + quant system básico
 # ========================================
-def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
+# def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
+def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cvd_div):
 
     # =====================
     # 1. LIQUIDITY GATE (FILTRO DURO)
@@ -428,6 +429,13 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
     if volume_24h > 1_000_000:
         score += 0.5
 
+    # =====================
+    # 7. CVD DIVERGENCE
+    # =====================
+
+    if bearish_cvd_div and rsi >= 70:
+        score += 2
+
     return score
 
 
@@ -504,6 +512,88 @@ def get_funding_label(funding):
         return "🔴"
 
 
+def get_cvd_label(cvd_div):
+    if cvd_div:
+        return "🟢"
+    return "🔴"
+
+
+# =========================
+# Pseudo CVD
+# =========================
+def calculate_pseudo_cvd(df):
+    volume = df["v"].astype(float)
+
+    delta = []
+
+    for i in range(len(df)):
+
+        open_price = float(df.iloc[i]["o"])
+        close_price = float(df.iloc[i]["c"])
+
+        if close_price > open_price:
+            delta.append(volume.iloc[i])
+
+        elif close_price < open_price:
+            delta.append(-volume.iloc[i])
+
+        else:
+            delta.append(0)
+
+    df["delta"] = delta
+    df["cvd"] = df["delta"].cumsum()
+
+    return df
+
+
+# =========================
+# Bearish CVD Divergence
+# =========================
+def detect_bearish_cvd_divergence(df, lookback=10):
+
+    if len(df) < lookback * 2:
+        return False
+
+    # últimos highs
+    recent_price_high = df["close"].iloc[-lookback:].max()
+    previous_price_high = df["close"].iloc[-lookback * 2 : -lookback].max()
+
+    # últimos highs CVD
+    recent_cvd_high = df["cvd"].iloc[-lookback:].max()
+    previous_cvd_high = df["cvd"].iloc[-lookback * 2 : -lookback].max()
+
+    # divergencia
+    price_higher_high = recent_price_high > previous_price_high
+    cvd_lower_high = recent_cvd_high < previous_cvd_high
+
+    return price_higher_high and cvd_lower_high
+
+
+# def detect_cvd_signal(df, lookback=10):
+
+#     recent_price_high = df["close"].iloc[-lookback:].max()
+#     previous_price_high = df["close"].iloc[-lookback*2:-lookback].max()
+
+#     recent_cvd_high = df["cvd"].iloc[-lookback:].max()
+#     previous_cvd_high = df["cvd"].iloc[-lookback*2:-lookback].max()
+
+#     # bearish divergence
+#     if (
+#         recent_price_high > previous_price_high
+#         and recent_cvd_high < previous_cvd_high
+#     ):
+#         return "🔻"
+
+#     # bullish confirmation
+#     if (
+#         recent_price_high > previous_price_high
+#         and recent_cvd_high > previous_cvd_high
+#     ):
+#         return "🟢"
+
+#     return "➖"
+
+
 # =========================
 # Scanner principal
 # =========================
@@ -528,17 +618,27 @@ def run_scanner():
                 continue
 
             rsi = calculate_rsi(df)
+
             rv = calculate_relative_volume(df)
+
+            df = calculate_pseudo_cvd(df)
+
+            bearish_cvd_div = detect_bearish_cvd_divergence(df)
+
             funding = market_data.get(symbol, {}).get("funding", 0) * 100
+
             oi = market_data.get(symbol, {}).get("open_interest", 0)
+
             oi_delta = get_oi_delta(symbol, oi)
+
             save_oi_snapshot(symbol, oi)
+
             volume_24h = market_data.get(symbol, {}).get("volume_24h", 0)
 
-            score = compute_short_score(rsi, funding, oi, oi_delta, rv, volume_24h)
+            score = compute_short_score(
+                rsi, funding, oi, oi_delta, rv, volume_24h, bearish_cvd_div
+            )
 
-            # signal = classify_from_score(score)
-            # signal = classify_from_score(score, rsi, funding)
             signal = classify_from_score(score, rsi, funding, rv, oi_delta)
 
             risk_label = get_risk_label(oi, volume_24h)
@@ -557,6 +657,7 @@ def run_scanner():
                         "score": score,
                         "signal": signal,
                         "risk_label": risk_label,
+                        "cvd_div": bearish_cvd_div,
                     }
                 )
 
@@ -569,29 +670,24 @@ def run_scanner():
 
     results = sorted(results, key=lambda x: x["rsi"], reverse=True)
 
-    print("=" * 120)
+    print("=" * 122)
 
     if not results:
         print(f"\nNo hay activos con RSI > {RSI_THRESHOLD}")
     else:
         for item in results:
             print(
-                f"{item['symbol']:<7} "
-                f"RSI: {item['rsi']:>6.2f}  "
-
-                # f"FUND: {item['funding']:>8.4f}  "
-                f"Fund({get_funding_label(item['funding'])}): {item['funding']:>8.4f}  "
-
-                f"OI: ${format_number(item['oi']):>8}  "
-                f"OIΔ: {item['oi_delta']:>6.2f}%  "
-                f"RVOL: {item['rv']:>5.2f}x  "
-                # f"Vol24h: ${format_number(item['volume_24h']):>8}  "
-                f"Vol24h({item['risk_label']}): ${format_number(item['volume_24h']):>8}  "
-                f"Sco({item['signal']}): {item['score']:>4.1f}  "
-                # f"{item['signal']}"
+                f"{item['symbol']:<6} "
+                f"RSI: {item['rsi']:>5.2f}  "
+                f"Fund({get_funding_label(item['funding'])}): {item['funding']:>7.4f}  "
+                f"CVD({get_cvd_label(item['cvd_div'])}) OI: ${format_number(item['oi']):>7}  "
+                f"OIΔ: {item['oi_delta']:>5.2f}%  "
+                f"RVOL: {item['rv']:>4.2f}x  "
+                f"Vol24h({item['risk_label']}): ${format_number(item['volume_24h']):>7}  "
+                f"SCO({item['signal']}): {item['score']:>4.1f}"
             )
 
-    print("=" * 120)
+    print("=" * 122)
 
 
 if __name__ == "__main__":
