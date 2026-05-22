@@ -20,3 +20,6 @@ __pycache__/
 *.sqlite
 *.db
 *.sqlite3
+
+# Other
+*.log
