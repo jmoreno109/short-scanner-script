@@ -58,6 +58,13 @@ def is_blacklisted(symbol):
     return False
 
 
+def log_message(message):
+    # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.now().strftime("%m-%d %H:%M")
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"[{timestamp}] {message}\n")
+        # f.write(f"{message}\n")
+
 # =========================
 # Guardar snapshot OI
 # =========================
@@ -373,14 +380,23 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cv
     # =====================
     # 2. RISK (estructura de liquidez) (OI / VOL)
     # =====================
+    # > 5 → Mercado muy especulativo / scalping / posible manipulación
+    # 2 – 5 → Mercado pesado / apalancado / alta rotación / ruido
+    # 1 – 2 → Normal / sano / Zona saludable
+    # < 1 → Mercado muy activo vs tamaño del OI
 
     oi_vol_ratio = oi / volume_24h
 
     if oi_vol_ratio > 5:
-        score -= 2  # high leverage / low liquidity
+        score -= 2    # leverage alto / riesgo / low liquidity
     elif oi_vol_ratio > 2:
-        score -= 1  # speculative
+        score -= 1    # speculative
+    elif 1 <= oi_vol_ratio <= 2:
+        score += 0.5    # neutral / balanced market
+    else:
+        score += 0  # mercado muy activo / alta rotación / flujo agresivo
 
+ 
     # =====================
     # 3. BIAS (lo más importante)
     # =====================
@@ -400,7 +416,7 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cv
         score += 3  # euforia extrema
     elif funding > 0.01:
         score += 2
-    elif funding > 0:
+    elif funding > 0.002:
         score += 1
     elif funding < -0.02:
         score -= 2  # riesgo de short squeeze
@@ -418,8 +434,8 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cv
 
     # RVOL (CALIBRADO PARA 4h)
     # Agotamiento  0.05 - 0.40
-    # Normal       0.5 - 1.0
-    # Expansion    1.2 - 2.0
+    # Normal       0.5  - 1.0
+    # Expansion    1.2  - 2.0
     # Squeeze momentum 2.5+
     
     # agotamiento extremo
@@ -492,6 +508,10 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cv
 
 def classify_from_score(score, rsi, funding, rvol, oi_delta):
 
+    # 🔥 STRONG SHORT
+    if score >= 8 and rsi >= 70 and funding > 0 and rvol < 1:
+        return "🟢"
+
     # 🔥 STRONG SHORT (confluencia real)
     # if score >= 7 and rsi >= 72 and funding > 0 and rvol < 0.8 and oi_delta > 0 :
     if score >= 7 and rsi >= 72 and funding > 0 and rvol < 0.6:
@@ -509,34 +529,6 @@ def classify_from_score(score, rsi, funding, rvol, oi_delta):
     if 2 <= score < 4:
         return "🟡"
 
-    return "🔴"
-
-
-def get_risk_label(oi, volume_24h):
-
-    if volume_24h == 0:
-        return "⚫"  # NO LIQUIDITY
-
-    oi_vol_ratio = oi / volume_24h
-
-    if oi_vol_ratio > 5:
-        return "🔴"  # HIGH LEVERAGE
-    elif oi_vol_ratio > 2:
-        return "🟡"  # SPECULATIVE
-    else:
-        return "🟢"  # HEALTHY
-
-
-def get_funding_label(funding):
-    if funding > 0:
-        return "🟢"
-    else:
-        return "🔴"
-
-
-def get_cvd_label(cvd_div):
-    if cvd_div:
-        return "🟢"
     return "🔴"
 
 
@@ -698,12 +690,34 @@ def get_price_direction(current_price, previous_price):
     return "⚪"
 
 
-def log_message(message):
-    # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    timestamp = datetime.now().strftime("%m-%d %H:%M")
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] {message}\n")
-        # f.write(f"{message}\n")
+def get_risk_label(oi, volume_24h):
+
+    if volume_24h == 0:
+        return "⚫"  # NO LIQUIDITY
+
+    oi_vol_ratio = oi / volume_24h
+
+    if oi_vol_ratio > 5:
+        return "🔴"  # HIGH LEVERAGE
+    elif oi_vol_ratio > 2:
+        return "🟡"  # SPECULATIVE
+    else:
+        return "🟢"  # HEALTHY
+
+
+def get_funding_label(funding):
+
+    if funding > 0:
+        return "🟢"
+    else:
+        return "🔴"
+
+
+def get_cvd_label(cvd_div):
+    
+    if cvd_div:
+        return "🟢"
+    return "🔴"
 
 
 def get_oi_label(oi):
@@ -822,6 +836,7 @@ def run_scanner():
                         "risk_label": risk_label,
                         "cvd_div": bearish_cvd_div,
                         "price_direction": price_direction,
+                        "price": price,
                     }
                 )
 
@@ -855,8 +870,9 @@ def run_scanner():
             #     f"CVD {get_cvd_label(item['cvd_div'])}"
             # )
 
+            #symbol_fmt = f"{symbol[:5]:<5}"
             line1 = (
-                f"{item['price_direction']} {item['symbol']:<6} "
+                f"{item['price_direction']} {item['symbol'][:6]:<6} "
                 f"RSI: {item['rsi']:>5.2f}  "
                 # f"RVOL: {item['rv']:>4.2f}x  "
                 f"RVOL({get_rvol_label(item['rv'])}): {item['rv']:>4.2f}x  "
@@ -870,15 +886,22 @@ def run_scanner():
             )
 
             line2 = (
-                f"{item['price_direction']} {item['symbol']:<6} "
+                f"{item['price_direction']} {item['symbol'][:6]:<6} "
+                f"PX: {item['price']:>7.2f}  "
                 f"RSI: {item['rsi']:>5.2f}  "
                 f"RVOL: {item['rv']:>4.2f}x  "
                 f"FUN({get_funding_label(item['funding'])}): {item['funding']:>7.4f}  "
-                f"OI: ${format_number(item['oi']):>7}  "
-                f"OIΔ: {item['oi_delta']:>6.2f}%  "
+
+                #f"OI: ${format_number(item['oi']):>7}  "
+                #f"OIΔ: {item['oi_delta']:>6.2f}%  "
+
+                #f"OI({item['oi_delta']:>6.2f}%): ${format_number(item['oi']):>7}  "
+                f"OI/OIΔ({get_oi_label(item['oi'])}): {item['oi_delta']:>6.2f}% "
+
+
                 f"V24h({item['risk_label']}): ${format_number(item['volume_24h']):>7}  "
-                f"SCO({item['signal']}): {item['score']:>4.1f} "
-                f"CVD({get_cvd_label(item['cvd_div'])})"
+                f"SCO({item['signal']}): {item['score']:>4.1f}"
+                #f"CVD({get_cvd_label(item['cvd_div'])})"
             )
 
             print(line1)
