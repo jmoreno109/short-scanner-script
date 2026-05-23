@@ -65,6 +65,7 @@ def log_message(message):
         f.write(f"[{timestamp}] {message}\n")
         # f.write(f"{message}\n")
 
+
 # =========================
 # Guardar snapshot OI
 # =========================
@@ -98,13 +99,26 @@ def get_oi_delta(symbol, current_oi):
     #     (symbol,),
     # )
 
+    # cursor.execute(
+    #     """
+    #     SELECT oi
+    #     FROM oi_history
+    #     WHERE symbol = ?
+    #     ORDER BY timestamp DESC
+    #     LIMIT 1 OFFSET 1
+    #     """,
+    #     (symbol,),
+    # )
+
+    # 4h
     cursor.execute(
         """
         SELECT oi
         FROM oi_history
         WHERE symbol = ?
+        AND timestamp <= strftime('%s','now') - 14400 
         ORDER BY timestamp DESC
-        LIMIT 1 OFFSET 1
+        LIMIT 1
         """,
         (symbol,),
     )
@@ -319,46 +333,49 @@ def format_number(num):
 # score multi-factor + quant system básico
 # =========================
 # def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
+def compute_short_score_0(
+    rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cvd_div, price_change_pct_24h
+):
 
-#     score = 0
+    score = 0
 
-#     # RSI
-#     if rsi >= 75:
-#         score += 3
-#     elif rsi >= 70:
-#         score += 2
-#     elif rsi >= 65:
-#         score += 1
+    # RSI
+    if rsi >= 75:
+        score += 3
+    elif rsi >= 70:
+        score += 2
+    elif rsi >= 65:
+        score += 1
 
-#     # Funding (crowded longs = bearish)
-#     if funding > 0.01:
-#         score += 2
-#     elif funding > 0:
-#         score += 1
-#     elif funding < -0.02:
-#         score -= 2   # squeeze risk (peligro)
+    # Funding (crowded longs = bearish)
+    if funding > 0.01:
+        score += 2
+    elif funding > 0:
+        score += 1
+    elif funding < -0.02:
+        score -= 2  # squeeze risk (peligro)
 
-#     # Open Interest (liquidez)
-#     if oi > 10_000_000:
-#         score += 1
+    # Open Interest (liquidez)
+    if oi > 10_000_000:
+        score += 1
 
-#     # OI Delta (flujo)
-#     if oi_delta > 1:
-#         score += 2
-#     elif oi_delta < -1:
-#         score += 1
+    # OI Delta (flujo)
+    if oi_delta > 1:
+        score += 2
+    elif oi_delta < -1:
+        score += 1
 
-#     # RVOL (debilidad o exceso)
-#     if rvol < 0.5:
-#         score += 2   # debilidad → bueno para short
-#     elif rvol > 1.5:
-#         score -= 1   # momentum fuerte contra short
+    # RVOL (debilidad o exceso)
+    if rvol < 0.5:
+        score += 2  # debilidad → bueno para short
+    elif rvol > 1.5:
+        score -= 1  # momentum fuerte contra short
 
-#     # volumen (confirmación de interés)
-#     if volume_24h > 1_000_000:
-#         score += 1
+    # volumen (confirmación de interés)
+    if volume_24h > 1_000_000:
+        score += 1
 
-#     return score
+    return score
 
 
 # ========================================
@@ -366,7 +383,9 @@ def format_number(num):
 # ========================================
 
 
-def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cvd_div):
+def compute_short_score(
+    rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cvd_div, price_change_pct_24h
+):
 
     # =====================
     # 1. LIQUIDITY GATE (FILTRO DURO)
@@ -388,15 +407,14 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cv
     oi_vol_ratio = oi / volume_24h
 
     if oi_vol_ratio > 5:
-        score -= 2    # leverage alto / riesgo / low liquidity
+        score -= 2  # leverage alto / riesgo / low liquidity
     elif oi_vol_ratio > 2:
-        score -= 1    # speculative
+        score -= 1  # speculative
     elif 1 <= oi_vol_ratio <= 2:
-        score += 0.5    # neutral / balanced market
+        score += 0.5  # neutral / balanced market
     else:
         score += 0  # mercado muy activo / alta rotación / flujo agresivo
 
- 
     # =====================
     # 3. BIAS (lo más importante)
     # =====================
@@ -437,7 +455,7 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cv
     # Normal       0.5  - 1.0
     # Expansion    1.2  - 2.0
     # Squeeze momentum 2.5+
-    
+
     # agotamiento extremo
     if rvol < 0.5 and rsi >= 70:
         score += 3
@@ -467,12 +485,48 @@ def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cv
     # =====================
 
     # expansión saludable / crowding
-    if oi_delta > 3 and 0.5 <= rvol <= 1.2 and rsi >= 60:
-        score += 1.5
+    if oi_delta > 3 and 0.5 <= rvol <= 1.2 and rsi >= 65:
+        score += 0.5
 
     # momentum peligroso contra short
     if oi_delta > 3 and rvol > 2.0:
         score -= 2
+
+
+    # =====================
+    # 5.5 PRICE EFFICIENCY
+    # =====================
+
+    # eficiencia:
+    # cuánto se mueve el precio
+    # relativo al nuevo positioning (OI)
+
+    efficiency = abs(price_change_pct_24h) / max(abs(oi_delta), 1)
+
+    # mucha exposición nueva
+    if oi_delta > 5: 
+
+        # MUCHOS longs entrando
+        # pero el precio ya ni responde
+        # -> absorción fuerte / agotamiento
+        if efficiency < 0.25:
+            score += 4
+
+        # agotamiento moderado
+        elif efficiency < 0.50:
+            score += 2
+
+        # el precio todavía responde bien
+        # al nuevo OI
+        # -> trend saludable / continuation saludable
+        elif efficiency > 1:
+            score -= 3
+
+    # longs entrando
+    # pero el precio ya negativo
+    # MUY bearish
+    if oi_delta > 5 and price_change_pct_24h < 0 and rsi >= 70:
+        score += 5
 
     # =====================
     # 6. CONTEXT
@@ -714,7 +768,7 @@ def get_funding_label(funding):
 
 
 def get_cvd_label(cvd_div):
-    
+
     if cvd_div:
         return "🟢"
     return "🔴"
@@ -739,10 +793,10 @@ def get_rvol_label(rvol):
 
     # momentum fuerte / mercado caliente / extremadamente especulativo
     elif rvol > 1.5:
-        return "🟡" #"🟠"
+        return "🟡"  # "🟠"
 
     # expansión saludable / actividad elevada
-    elif rvol > 1: #0.8
+    elif rvol > 1:  # 0.8
         return "🟡"
 
     # normal o débil / agotamiento
@@ -813,7 +867,7 @@ def run_scanner():
             save_price_snapshot(symbol, price)
 
             score = compute_short_score(
-                rsi, funding, oi, oi_delta, rv, volume_24h, bearish_cvd_div
+                rsi, funding, oi, oi_delta, rv, volume_24h, bearish_cvd_div, change_24h
             )
 
             signal = classify_from_score(score, rsi, funding, rv, oi_delta)
@@ -870,7 +924,7 @@ def run_scanner():
             #     f"CVD {get_cvd_label(item['cvd_div'])}"
             # )
 
-            #symbol_fmt = f"{symbol[:5]:<5}"
+            # symbol_fmt = f"{symbol[:5]:<5}"
             line1 = (
                 f"{item['price_direction']} {item['symbol'][:6]:<6} "
                 f"RSI: {item['rsi']:>5.2f}  "
@@ -891,17 +945,13 @@ def run_scanner():
                 f"RSI: {item['rsi']:>5.2f}  "
                 f"RVOL: {item['rv']:>4.2f}x  "
                 f"FUN({get_funding_label(item['funding'])}): {item['funding']:>7.4f}  "
-
-                #f"OI: ${format_number(item['oi']):>7}  "
-                #f"OIΔ: {item['oi_delta']:>6.2f}%  "
-
-                #f"OI({item['oi_delta']:>6.2f}%): ${format_number(item['oi']):>7}  "
+                # f"OI: ${format_number(item['oi']):>7}  "
+                # f"OIΔ: {item['oi_delta']:>6.2f}%  "
+                # f"OI({item['oi_delta']:>6.2f}%): ${format_number(item['oi']):>7}  "
                 f"OI/OIΔ({get_oi_label(item['oi'])}): {item['oi_delta']:>6.2f}% "
-
-
                 f"V24h({item['risk_label']}): ${format_number(item['volume_24h']):>7}  "
                 f"SCO({item['signal']}): {item['score']:>4.1f}"
-                #f"CVD({get_cvd_label(item['cvd_div'])})"
+                # f"CVD({get_cvd_label(item['cvd_div'])})"
             )
 
             print(line1)
