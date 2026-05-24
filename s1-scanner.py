@@ -1,4 +1,15 @@
 
+#🧠 Comparación honesta con tu sistema
+#
+#Tu scanner está combinando cosas que en la industria están separadas:
+#
+#Tu sistema	Equivalente pro
+#RSI 3D	trend macro
+#RVOL 4H	momentum expansion
+#OI delta	positioning flow
+#efficiency	absorption proxy
+#CVD proxy	order flow bias
+
 #Setup Short
 #RSI_3D > 70
 #AND funding > 0.05

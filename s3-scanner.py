@@ -41,16 +41,36 @@ CREATE TABLE IF NOT EXISTS price_history (
     price REAL
 )
 """)
+conn.commit()
 
-# =========================
-# Load Blacklist
-# =========================
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS scanner_history (
+    symbol TEXT,
+    timestamp INTEGER,
+    price REAL,
+    rsi REAL,
+    rvol REAL,
+    funding REAL,
+    oi REAL,
+    oi_delta REAL,
+    efficiency REAL,
+    volume_24h REAL,
+    score REAL,
+    price_change_24h REAL,
+    bearish_cvd_div INTEGER
+)
+""")
+conn.commit()
+
 with open("blacklist.txt", "r", encoding="utf-8") as f:
     BLACKLIST = [
         line.strip() for line in f if line.strip() and not line.startswith("#")
     ]
 
 
+# =========================
+# Define los activos a ignorar
+# =========================
 def is_blacklisted(symbol):
     for rule in BLACKLIST:
         if fnmatch(symbol.upper(), rule.upper()):
@@ -58,6 +78,9 @@ def is_blacklisted(symbol):
     return False
 
 
+# =========================
+# Define el log scanner
+# =========================
 def log_message(message):
     # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     timestamp = datetime.now().strftime("%m-%d %H:%M")
@@ -83,32 +106,69 @@ def save_oi_snapshot(symbol, oi):
 
 
 # =========================
+# Guardar snapshot market
+# =========================
+def save_scanner_snapshot(
+    symbol,
+    price,
+    rsi,
+    rvol,
+    funding,
+    oi,
+    oi_delta,
+    efficiency,
+    volume_24h,
+    score,
+    price_change_24h,
+    bearish_cvd_div,
+):
+
+    cursor.execute(
+        """
+        INSERT INTO scanner_history (
+            symbol,
+            timestamp,
+            price,
+            rsi,
+            rvol,
+            funding,
+            oi,
+            oi_delta,
+            efficiency,
+            volume_24h,
+            score,
+            price_change_24h,
+            bearish_cvd_div
+        )
+        VALUES (
+            ?,
+            strftime('%s','now'),
+            ?,?,?,?,?,?,?,?,?,?,?
+        )
+        """,
+        (
+            symbol,
+            price,
+            rsi,
+            rvol,
+            funding,
+            oi,
+            oi_delta,
+            efficiency,
+            volume_24h,
+            score,
+            price_change_24h,
+            int(bearish_cvd_div),
+        ),
+    )
+
+    conn.commit()
+
+
+# =========================
 # Calcular OI Delta
 # =========================
 def get_oi_delta(symbol, current_oi):
-
-    # cursor.execute(
-    #     """
-    #     SELECT oi
-    #     FROM oi_history
-    #     WHERE symbol = ?
-    #     AND timestamp <= strftime('%s','now') - 3600
-    #     ORDER BY timestamp DESC
-    #     LIMIT 1
-    #     """,
-    #     (symbol,),
-    # )
-
-    # cursor.execute(
-    #     """
-    #     SELECT oi
-    #     FROM oi_history
-    #     WHERE symbol = ?
-    #     ORDER BY timestamp DESC
-    #     LIMIT 1 OFFSET 1
-    #     """,
-    #     (symbol,),
-    # )
 
     # 4h
     cursor.execute(
@@ -269,20 +329,19 @@ def get_market_data():
     market_data = {}
 
     for asset, ctx in zip(universe, contexts):
+
         symbol = asset["name"]
         funding = float(ctx.get("funding", 0))
         volume_24h = float(ctx.get("dayNtlVlm", 0))
         open_interest = float(ctx.get("openInterest", 0))
-
         price = float(ctx.get("markPx", 0))
+        oi_usd = open_interest * price
 
         prev_day_price = float(ctx.get("prevDayPx", 0))
         if prev_day_price > 0:
             change_24h = ((price - prev_day_price) / prev_day_price) * 100
         else:
             change_24h = 0
-
-        oi_usd = open_interest * price
 
         market_data[symbol] = {
             "funding": funding,
@@ -329,60 +388,9 @@ def format_number(num):
     return f"{num:,.0f}"
 
 
-# =========================
-# score multi-factor + quant system básico
-# =========================
-# def compute_short_score(rsi, funding, oi, oi_delta, rvol, volume_24h):
-def compute_short_score_0(
-    rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cvd_div, price_change_pct_24h
-):
-
-    score = 0
-
-    # RSI
-    if rsi >= 75:
-        score += 3
-    elif rsi >= 70:
-        score += 2
-    elif rsi >= 65:
-        score += 1
-
-    # Funding (crowded longs = bearish)
-    if funding > 0.01:
-        score += 2
-    elif funding > 0:
-        score += 1
-    elif funding < -0.02:
-        score -= 2  # squeeze risk (peligro)
-
-    # Open Interest (liquidez)
-    if oi > 10_000_000:
-        score += 1
-
-    # OI Delta (flujo)
-    if oi_delta > 1:
-        score += 2
-    elif oi_delta < -1:
-        score += 1
-
-    # RVOL (debilidad o exceso)
-    if rvol < 0.5:
-        score += 2  # debilidad → bueno para short
-    elif rvol > 1.5:
-        score -= 1  # momentum fuerte contra short
-
-    # volumen (confirmación de interés)
-    if volume_24h > 1_000_000:
-        score += 1
-
-    return score
-
-
 # ========================================
 # Score multi-factor + quant system básico
 # ========================================
-
-
 def compute_short_score(
     rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cvd_div, price_change_pct_24h
 ):
@@ -492,11 +500,9 @@ def compute_short_score(
     if oi_delta > 3 and rvol > 2.0:
         score -= 2
 
-
     # =====================
     # 5.5 PRICE EFFICIENCY
     # =====================
-
     # eficiencia:
     # cuánto se mueve el precio
     # relativo al nuevo positioning (OI)
@@ -504,21 +510,20 @@ def compute_short_score(
     efficiency = abs(price_change_pct_24h) / max(abs(oi_delta), 1)
 
     # mucha exposición nueva
-    if oi_delta > 5: 
+    if oi_delta > 6: #7-8
 
-        # MUCHOS longs entrando
-        # pero el precio ya ni responde
-        # -> absorción fuerte / agotamiento
+        # Muchos longs entrando pero el precio ya ni responde
+        # Absorción fuerte / agotamiento
+        # Empieza a entrar mucho OI, pero el precio ya no acelera igual.
         if efficiency < 0.25:
             score += 4
 
-        # agotamiento moderado
+        # Agotamiento moderado
         elif efficiency < 0.50:
             score += 2
 
-        # el precio todavía responde bien
-        # al nuevo OI
-        # -> trend saludable / continuation saludable
+        # El precio todavía responde bien al nuevo OI
+        # Trend saludable / continuation saludable
         elif efficiency > 1:
             score -= 3
 
@@ -560,9 +565,121 @@ def compute_short_score(
     return round(score, 1)
 
 
+# ========================================
+# TREND SCORE (RSI + RVOL)
+# ¿Está sobreextendido o en continuación fuerte?
+# ========================================
+def trend_score(rsi, rvol):
+
+    score = 0
+
+    # RSI (exceso direccional)
+    if rsi >= 75:
+        score += 4
+    elif rsi >= 70:
+        score += 3
+    elif rsi >= 65:
+        score += 1
+    else:
+        score -= 1
+
+    # RVOL (fase del movimiento)
+    if rvol < 0.5:
+        score += 2   # agotamiento
+    elif rvol < 0.8:
+        score += 1
+    elif rvol < 1.2:
+        score -= 0.5
+    elif rvol < 2:
+        score -= 1.5
+    else:
+        score -= 3
+
+    return round(score, 2)
+
+
+# ========================================
+# POSITIONING SCORE (OI + FUNDING + OIΔ)
+# ¿Está el mercado cargado en longs o desarmándose?
+# ========================================
+def positioning_score(oi, funding, oi_delta):
+
+    score = 0
+
+    # FUNDING (crowding de longs)
+    if funding > 0.03:
+        score += 3
+    elif funding > 0.01:
+        score += 2
+    elif funding > 0.002:
+        score += 1
+    elif funding < -0.02:
+        score -= 2
+
+    # OI DELTA (flow)
+    if oi_delta > 5:
+        score += 3
+    elif oi_delta > 2:
+        score += 2
+    elif oi_delta < -2:
+        score -= 2
+
+    # OI absoluto (riesgo estructural)
+    if oi < 5_000_000:
+        score -= 3
+    elif oi < 10_000_000:
+        score -= 2
+    elif oi > 50_000_000:
+        score += 1
+
+    return round(score, 2)
+
+
+# ========================================
+# ABSORPTION SCORE (EFFICIENCY + CVD)
+# ¿El mercado está absorbiendo o hay continuación real?
+# ========================================
+def absorption_score(price_change_pct_24h, oi_delta, bearish_cvd_div):
+
+    score = 0
+
+    efficiency = abs(price_change_pct_24h) / max(abs(oi_delta), 1)
+
+    # ABSORCIÓN (mucho OI, poco movimiento)
+    if efficiency < 0.25:
+        score += 4
+    elif efficiency < 0.5:
+        score += 2
+    elif efficiency > 1:
+        score -= 3
+
+    # CVD divergence (smart money vs price)
+    if bearish_cvd_div:
+        score += 2
+
+    # exceso de positioning sin reacción
+    if oi_delta > 5 and price_change_pct_24h < 0:
+        score += 3
+
+    return round(score, 2)
+
+
+# ========================================
+# SCORE FINAL (combinación limpia)  
+# ========================================
+def final_score(trend, positioning, absorption):
+
+    score = trend + positioning + absorption
+    return round(score, 2)
+
+
 def classify_from_score(score, rsi, funding, rvol, oi_delta):
 
     # 🔥 STRONG SHORT
+    if score >= 12 and funding > 0:
+        return "🚀"
+
+    # 🔥 STRONG SHORT 
     if score >= 8 and rsi >= 70 and funding > 0 and rvol < 1:
         return "🟢"
 
@@ -576,7 +693,7 @@ def classify_from_score(score, rsi, funding, rvol, oi_delta):
         return "🟡"
 
     # ⚠️ SHORT SETUP
-    if 4 <= score < 7:
+    if 4 <= score < 7: # 🟠
         return "🟡"
 
     # ⚠️ WEAK EDGE
@@ -679,27 +796,6 @@ def save_price_snapshot(symbol, price):
 # =========================
 # Obtener dirección precio
 # =========================
-# def get_previous_price(symbol):
-
-#     cursor.execute(
-#         """
-#         SELECT price
-#         FROM price_history
-#         WHERE symbol = ?
-#         ORDER BY timestamp DESC
-#         LIMIT 1 OFFSET 1
-#         """,
-#         (symbol,),
-#     )
-
-#     row = cursor.fetchone()
-
-#     if not row:
-#         return None
-
-#     return row[0]
-
-
 def get_previous_price(symbol):
 
     cursor.execute(
@@ -870,6 +966,23 @@ def run_scanner():
                 rsi, funding, oi, oi_delta, rv, volume_24h, bearish_cvd_div, change_24h
             )
 
+            efficiency = abs(change_24h) / max(abs(oi_delta), 1)
+
+            save_scanner_snapshot(
+                symbol=symbol,
+                price=price,
+                rsi=rsi,
+                rvol=rv,
+                funding=funding,
+                oi=oi,
+                oi_delta=oi_delta,
+                efficiency=efficiency,
+                volume_24h=volume_24h,
+                score=score,
+                price_change_24h=change_24h,
+                bearish_cvd_div=bearish_cvd_div,
+            )
+
             signal = classify_from_score(score, rsi, funding, rv, oi_delta)
 
             risk_label = get_risk_label(oi, volume_24h)
@@ -911,32 +1024,15 @@ def run_scanner():
     else:
         for item in results:
 
-            # line = (
-            #     f"{item['price_direction']} | "
-            #     f"{item['symbol']:<6} | "
-            #     f"RSI {item['rsi']:>5.2f} | "
-            #     f"RVOL {item['rv']:>4.2f}x | "
-            #     f"FUN {item['funding']:>7.4f} | "
-            #     f"OI ${format_number(item['oi'])} | "
-            #     f"OIΔ {item['oi_delta']:>6.2f}% | "
-            #     f"VOL ${format_number(item['volume_24h'])} | "
-            #     f"SCO {item['score']:>4.1f} | "
-            #     f"CVD {get_cvd_label(item['cvd_div'])}"
-            # )
-
-            # symbol_fmt = f"{symbol[:5]:<5}"
             line1 = (
                 f"{item['price_direction']} {item['symbol'][:6]:<6} "
                 f"RSI: {item['rsi']:>5.2f}  "
-                # f"RVOL: {item['rv']:>4.2f}x  "
                 f"RVOL({get_rvol_label(item['rv'])}): {item['rv']:>4.2f}x  "
                 f"FUN({get_funding_label(item['funding'])}): {item['funding']:>7.4f}  "
-                # f"OI: ${format_number(item['oi']):>7}  "
                 f"OI({get_oi_label(item['oi'])}): ${format_number(item['oi']):>7} "
                 f"OIΔ: {item['oi_delta']:>6.2f}%  "
                 f"V24h({item['risk_label']}): ${format_number(item['volume_24h']):>7}  "
                 f"SCO({item['signal']}): {item['score']:>4.1f}"
-                # f"CVD({get_cvd_label(item['cvd_div'])})"
             )
 
             line2 = (

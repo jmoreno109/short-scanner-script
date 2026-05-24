@@ -2,6 +2,7 @@
 # LONG SCANNER VERSION
 # Inversión del scanner de SHORTS
 # ==========================================
+# Swing Exhaustion Scanner
 
 import requests
 import pandas as pd
