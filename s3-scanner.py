@@ -392,7 +392,7 @@ def format_number(num):
 # Score multi-factor + quant system básico
 # ========================================
 def compute_short_score(
-    rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cvd_div, price_change_pct_24h
+    rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cvd_div, price_change_pct_24h, symbol
 ):
 
     # =====================
@@ -428,7 +428,9 @@ def compute_short_score(
     # =====================
 
     # RSI EXTREMO
-    if rsi >= 75:
+    if rsi >= 80:
+        score += 5
+    elif rsi >= 75:
         score += 4
     elif rsi >= 70:
         score += 3
@@ -503,35 +505,42 @@ def compute_short_score(
     # =====================
     # 5.5 PRICE EFFICIENCY
     # =====================
-    # eficiencia:
-    # cuánto se mueve el precio
+    # eficiencia: cuánto se mueve el precio
     # relativo al nuevo positioning (OI)
+    
+    price_response = price_change_pct_24h / max(abs(oi_delta), 1)
 
-    efficiency = abs(price_change_pct_24h) / max(abs(oi_delta), 1)
+    oi_threshold = get_dynamic_oi_threshold(symbol)
 
     # mucha exposición nueva
-    if oi_delta > 6: #7-8
+    if oi_delta > oi_threshold:
 
-        # Muchos longs entrando pero el precio ya ni responde
-        # Absorción fuerte / agotamiento
-        # Empieza a entrar mucho OI, pero el precio ya no acelera igual.
-        if efficiency < 0.25:
+        # longs atrapados nuevo OI perdiendo dinero
+        if -0.25 < price_response < 0:
+            score += 6
+
+        # Longs entrando pero el precio ya ni responde Absorción fuerte / agotamiento
+        # Empieza a entrar mucho OI, pero el precio ya no acelera igual
+        elif 0 <= price_response < 0.25:
             score += 4
 
         # Agotamiento moderado
-        elif efficiency < 0.50:
+        elif 0.25 <= price_response < 0.50:
             score += 2
+
+        # continuation moderada
+        elif 0.50 <= price_response < 1.0:
+            score -= 1
 
         # El precio todavía responde bien al nuevo OI
         # Trend saludable / continuation saludable
-        elif efficiency > 1:
+        elif 1.0 <= price_response < 2.0:
             score -= 3
 
-    # longs entrando
-    # pero el precio ya negativo
-    # MUY bearish
-    if oi_delta > 5 and price_change_pct_24h < 0 and rsi >= 70:
-        score += 5
+        # squeeze / expansion agresiva
+        elif price_response >= 2.0:
+            score -= 5
+
 
     # =====================
     # 6. CONTEXT
@@ -558,11 +567,155 @@ def compute_short_score(
     # =====================
     # 7. CVD DIVERGENCE
     # =====================
-
-    if bearish_cvd_div and rsi >= 70:
-        score += 2
+    if bearish_cvd_div < 0 and rsi >= 70:
+         score += 2    
 
     return round(score, 1)
+
+
+def detect_cvd_signal(df, lookback=10):
+
+    recent_price_high = df["close"].iloc[-lookback:].max()
+    previous_price_high = df["close"].iloc[-lookback * 2 : -lookback].max()
+
+    recent_cvd_high = df["cvd"].iloc[-lookback:].max()
+    previous_cvd_high = df["cvd"].iloc[-lookback * 2 : -lookback].max()
+
+    # bearish divergence
+    if recent_price_high > previous_price_high and recent_cvd_high < previous_cvd_high:
+        return -1
+
+    # bullish confirmation
+    if recent_price_high > previous_price_high and recent_cvd_high > previous_cvd_high:
+        return 1
+
+    return 0
+
+def get_dynamic_oi_threshold(symbol, window=50):
+
+    cursor.execute(
+        """
+        SELECT oi_delta
+        FROM scanner_history
+        WHERE symbol = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        (symbol, window),
+    )
+
+    rows = cursor.fetchall()
+
+    if len(rows) < 10:
+        return 5
+
+    deltas = [
+        abs(r[0])
+        for r in rows
+        if r[0] is not None
+    ]
+
+    if not deltas:
+        return 5
+
+    # return max(
+    #     5,
+    #     np.percentile(deltas, 90)
+    # )
+    return min(
+        50,
+        max(
+            5,
+            np.percentile(deltas, 95)
+        )
+    )
+
+
+# def get_dynamic_oi_threshold(symbol, window=30):
+
+#     cursor.execute(
+#         """
+#         SELECT oi
+#         FROM oi_history
+#         WHERE symbol = ?
+#         ORDER BY timestamp DESC
+#         LIMIT ?
+#         """,
+#         (symbol, window + 4),
+#     )
+
+#     rows = cursor.fetchall()
+
+#     if len(rows) < 10:
+#         return 5
+
+#     oi_values = [r[0] for r in rows]
+
+#     deltas = []
+
+#     # comparar snapshots separados
+#     # por 4 posiciones aprox
+#     for i in range(4, len(oi_values)):
+
+#         curr = oi_values[i - 4]
+#         prev = oi_values[i]
+
+#         if prev > 0:
+
+#             delta = (
+#                 (curr - prev) / prev
+#             ) * 100
+
+#             deltas.append(abs(delta))
+
+#     if not deltas:
+#         return 5
+
+#     return max(
+#         5,
+#         np.percentile(deltas, 90)
+#     )
+
+
+# def get_dynamic_oi_threshold(symbol, window=50):
+
+#     cursor.execute(
+#         """
+#         SELECT oi
+#         FROM oi_history
+#         WHERE symbol = ?
+#         ORDER BY timestamp DESC
+#         LIMIT ?
+#         """,
+#         (symbol, window)
+#     )
+
+#     rows = cursor.fetchall()
+
+#     if len(rows) < 10:
+#         return 5
+
+#     oi_values = [r[0] for r in rows]
+
+#     deltas = []
+
+#     for i in range(1, len(oi_values)):
+
+#         prev = oi_values[i]
+
+#         curr = oi_values[i - 1]
+
+#         if prev > 0:
+#             delta = ((curr - prev) / prev) * 100
+#             deltas.append(delta)
+
+#     if not deltas:
+#         return 5
+
+#     return max(
+#         5,
+#         np.percentile(deltas, 90)
+#     )
 
 
 # ========================================
@@ -945,6 +1098,7 @@ def run_scanner():
             df_cvd = calculate_pseudo_cvd(df_rvol)
 
             bearish_cvd_div = detect_bearish_cvd_divergence(df_cvd)
+            cvd_signal = detect_cvd_signal(df_cvd)
 
             funding = market_data.get(symbol, {}).get("funding", 0) * 100
 
@@ -963,10 +1117,12 @@ def run_scanner():
             save_price_snapshot(symbol, price)
 
             score = compute_short_score(
-                rsi, funding, oi, oi_delta, rv, volume_24h, bearish_cvd_div, change_24h
+                #rsi, funding, oi, oi_delta, rv, volume_24h, bearish_cvd_div, change_24h, symbol
+                rsi, funding, oi, oi_delta, rv, volume_24h, cvd_signal, change_24h, symbol
             )
 
-            efficiency = abs(change_24h) / max(abs(oi_delta), 1)
+            #efficiency = abs(change_24h) / max(abs(oi_delta), 1)
+            price_response = change_24h / max(abs(oi_delta), 1)
 
             save_scanner_snapshot(
                 symbol=symbol,
@@ -976,7 +1132,7 @@ def run_scanner():
                 funding=funding,
                 oi=oi,
                 oi_delta=oi_delta,
-                efficiency=efficiency,
+                efficiency=price_response,
                 volume_24h=volume_24h,
                 score=score,
                 price_change_24h=change_24h,
