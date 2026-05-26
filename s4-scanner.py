@@ -15,7 +15,7 @@ parser.add_argument("--rsi", type=float, default=70)
 args = parser.parse_args()
 RSI_THRESHOLD = args.rsi
 
-BASE_URL = "https://api.hyperliquid.xyz/info"
+#BASE_URL = "https://api.hyperliquid.xyz/info"
 RSI_PERIOD = 14
 VOL_WINDOW = 20
 REQUEST_DELAY = 0.25
@@ -92,41 +92,103 @@ def cleanup_old_data():
 # =========================
 # Obtener mercados
 # =========================
+# def get_markets():
+#     payload = {"type": "meta"}
+
+#     r = requests.post(BASE_URL, json=payload)
+#     data = r.json()
+
+#     if "universe" not in data:
+#         print("Error: respuesta inválida del API, falta 'universe'")
+#         return []
+
+#     return [asset["name"] for asset in data["universe"]]
+
+
+# =========================
+# Obtener mercados
+# =========================
 def get_markets():
-    payload = {"type": "meta"}
 
-    r = requests.post(BASE_URL, json=payload)
-    data = r.json()
+    cursor.execute("""
+        SELECT DISTINCT symbol
+        FROM scanner_history
+        ORDER BY symbol
+    """)
 
-    if "universe" not in data:
-        print("Error: respuesta inválida del API, falta 'universe'")
-        return []
+    rows = cursor.fetchall()
 
-    return [asset["name"] for asset in data["universe"]]
+    return [row[0] for row in rows]
 
 
 # =========================
 # Obtener candles
 # =========================
-def get_candles(symbol, interval="3d", limit=200):
-    payload = {
-        "type": "candleSnapshot",
-        "req": {"coin": symbol, "interval": interval, "startTime": 0},
-    }
+# def get_candles(symbol, interval="3d", limit=200):
+#     payload = {
+#         "type": "candleSnapshot",
+#         "req": {"coin": symbol, "interval": interval, "startTime": 0},
+#     }
 
-    r = requests.post(BASE_URL, json=payload)
+#     r = requests.post(BASE_URL, json=payload)
 
-    if r.status_code != 200:
+#     if r.status_code != 200:
+#         return None
+
+#     data = r.json()
+
+#     if not data:
+#         return None
+
+#     df = pd.DataFrame(data)
+
+#     df["close"] = df["c"].astype(float)
+
+#     return df
+
+
+# =========================
+# Obtener candles
+# =========================
+def get_candles(symbol, interval, limit=200):
+
+    cursor.execute(
+        """
+        SELECT
+            candle_time,
+            open,
+            high,
+            low,
+            close,
+            volume
+        FROM candles
+        WHERE symbol = ?
+        AND interval = ?
+        ORDER BY candle_time DESC
+        LIMIT ?
+        """,
+        (symbol, interval, limit),
+    )
+
+    rows = cursor.fetchall()
+
+    if not rows:
         return None
 
-    data = r.json()
+    # invertir para dejar vieja -> nueva
+    rows.reverse()
 
-    if not data:
-        return None
-
-    df = pd.DataFrame(data)
-
-    df["close"] = df["c"].astype(float)
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "candle_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ],
+    )
 
     return df
 
@@ -142,42 +204,93 @@ def calculate_rsi(df, period=RSI_PERIOD):
 # =========================
 # Obtener funding y Open Interest
 # =========================
+# def get_market_data():
+#     payload = {"type": "metaAndAssetCtxs"}
+
+#     r = requests.post(BASE_URL, json=payload)
+#     data = r.json()
+
+#     if len(data) < 2 or "universe" not in data[0]:
+#         print("Error: respuesta inválida del API para datos de mercado")
+#         return {}
+
+#     universe = data[0]["universe"]
+#     contexts = data[1]
+
+#     market_data = {}
+
+#     for asset, ctx in zip(universe, contexts):
+
+#         symbol = asset["name"]
+#         funding = float(ctx.get("funding", 0))
+#         volume_24h = float(ctx.get("dayNtlVlm", 0))
+#         open_interest = float(ctx.get("openInterest", 0))
+#         price = float(ctx.get("markPx", 0))
+#         oi_usd = open_interest * price
+
+#         prev_day_price = float(ctx.get("prevDayPx", 0))
+#         if prev_day_price > 0:
+#             change_24h = ((price - prev_day_price) / prev_day_price) * 100
+#         else:
+#             change_24h = 0
+
+#         market_data[symbol] = {
+#             "funding": funding,
+#             "open_interest": oi_usd,
+#             "volume_24h": volume_24h,
+#             "price": price,
+#             "change_24h": change_24h,
+#         }
+
+#     return market_data
+
+
+
+
+# =========================
+# Obtener funding y Open Interest
+# =========================
+
 def get_market_data():
-    payload = {"type": "metaAndAssetCtxs"}
 
-    r = requests.post(BASE_URL, json=payload)
-    data = r.json()
+    cursor.execute("""
 
-    if len(data) < 2 or "universe" not in data[0]:
-        print("Error: respuesta inválida del API para datos de mercado")
-        return {}
+        SELECT ms.symbol,
+               ms.funding,
+               ms.open_interest,
+               ms.volume_24h,
+               ms.price,
+               ms.change_24h
 
-    universe = data[0]["universe"]
-    contexts = data[1]
+        FROM market_snapshots ms
+
+        INNER JOIN (
+            SELECT symbol, MAX(created_at) AS max_time
+            FROM market_snapshots
+            GROUP BY symbol
+        ) latest
+
+        ON ms.symbol = latest.symbol
+        AND ms.created_at = latest.max_time
+
+    """)
+
+    rows = cursor.fetchall()
+
+    #conn.close()
 
     market_data = {}
 
-    for asset, ctx in zip(universe, contexts):
+    for row in rows:
 
-        symbol = asset["name"]
-        funding = float(ctx.get("funding", 0))
-        volume_24h = float(ctx.get("dayNtlVlm", 0))
-        open_interest = float(ctx.get("openInterest", 0))
-        price = float(ctx.get("markPx", 0))
-        oi_usd = open_interest * price
-
-        prev_day_price = float(ctx.get("prevDayPx", 0))
-        if prev_day_price > 0:
-            change_24h = ((price - prev_day_price) / prev_day_price) * 100
-        else:
-            change_24h = 0
+        symbol = row[0]
 
         market_data[symbol] = {
-            "funding": funding,
-            "open_interest": oi_usd,
-            "volume_24h": volume_24h,
-            "price": price,
-            "change_24h": change_24h,
+            "funding": row[1],
+            "open_interest": row[2],
+            "volume_24h": row[3],
+            "price": row[4],
+            "change_24h": row[5],
         }
 
     return market_data
@@ -188,7 +301,8 @@ def get_market_data():
 # =========================
 def calculate_relative_volume(df):
 
-    volume = df["v"].astype(float)
+    #volume = df["v"].astype(float)
+    volume = df["volume"].astype(float)
 
     # excluir vela actual incompleta
     current_volume = volume.iloc[-2]
@@ -555,14 +669,18 @@ def classify_from_score(score, rsi, funding, rvol, oi_delta):
 # =========================
 def calculate_pseudo_cvd(df):
 
-    volume = df["v"].astype(float)
+    #volume = df["v"].astype(float)
+    volume = df["volume"].astype(float)
 
     delta = []
 
     for i in range(len(df)):
 
-        open_price = float(df.iloc[i]["o"])
-        close_price = float(df.iloc[i]["c"])
+        # open_price = float(df.iloc[i]["o"])
+        # close_price = float(df.iloc[i]["c"])
+
+        open_price = float(df.iloc[i]["open"])
+        close_price = float(df.iloc[i]["close"])
 
         # retorno de la vela
         move_pct = (close_price - open_price) / open_price
@@ -638,6 +756,7 @@ def detect_cvd_signal(df, lookback=10):
 
     return 0
 
+
 def get_cvd_label(cvd_div):
 
     # bearish divergence
@@ -649,7 +768,6 @@ def get_cvd_label(cvd_div):
         return "🟢"
 
     return "➖"
-
 
 
 # =========================
@@ -834,7 +952,7 @@ def run_scanner():
             df_cvd = calculate_pseudo_cvd(df_rvol)
 
             # ---
-            #bearish_cvd_div = detect_bearish_cvd_divergence(df_cvd)
+            # bearish_cvd_div = detect_bearish_cvd_divergence(df_cvd)
             cvd_signal = detect_cvd_signal(df_cvd)
             # ---
 
@@ -851,8 +969,15 @@ def run_scanner():
             price_direction = get_price_direction(price, previous_price)
 
             score = compute_short_score(
-                #rsi, funding, oi, oi_delta, rv, volume_24h, bearish_cvd_div, change_24h
-                rsi, funding, oi, oi_delta, rv, volume_24h, cvd_signal, change_24h
+                # rsi, funding, oi, oi_delta, rv, volume_24h, bearish_cvd_div, change_24h
+                rsi,
+                funding,
+                oi,
+                oi_delta,
+                rv,
+                volume_24h,
+                cvd_signal,
+                change_24h,
             )
 
             efficiency = abs(change_24h) / max(abs(oi_delta), 1)
@@ -865,7 +990,7 @@ def run_scanner():
             trend = trend_score(rsi, rv)
             positioning = positioning_score(oi, funding, oi_delta)
 
-            #absorption = absorption_score(change_24h, oi_delta, bearish_cvd_div)
+            # absorption = absorption_score(change_24h, oi_delta, bearish_cvd_div)
             absorption = absorption_score(change_24h, oi_delta, cvd_signal)
 
             fscore = final_score(trend, positioning, absorption)
@@ -887,7 +1012,7 @@ def run_scanner():
                         "score": score,
                         "signal": signal,
                         "risk_label": risk_label,
-                        #"cvd_div": bearish_cvd_div,
+                        # "cvd_div": bearish_cvd_div,
                         "price_direction": price_direction,
                         "price": price,
                         "fscore": fscore,
@@ -924,10 +1049,11 @@ def run_scanner():
                 f"SubScore({item['signal_prom']}): {item['fscore']:>5.1f}  "
                 f"CVD({get_cvd_label(item['cvd_signal'])})"
             )
-            
+
             print(line1)
 
     print("=" * 122)
+
 
 if __name__ == "__main__":
     run_scanner()

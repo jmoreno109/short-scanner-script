@@ -7,6 +7,7 @@ import sqlite3
 from fnmatch import fnmatch
 from datetime import datetime
 import numpy as np
+import json
 
 LOG_FILE = "short_scanner.log"
 
@@ -61,6 +62,40 @@ CREATE TABLE IF NOT EXISTS scanner_history (
 )
 """)
 conn.commit()
+
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS market_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT,
+    funding REAL,
+    open_interest REAL,
+    volume_24h REAL,
+    price REAL,
+    change_24h REAL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+""")
+conn.commit()
+
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS candles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT,
+    interval TEXT,
+    open REAL,
+    high REAL,
+    low REAL,
+    close REAL,
+    volume REAL,
+    candle_time DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(symbol, interval, candle_time)
+)
+""")
+conn.commit()
+
 
 with open("blacklist.txt", "r", encoding="utf-8") as f:
     BLACKLIST = [
@@ -228,6 +263,21 @@ def get_markets():
     return [asset["name"] for asset in data["universe"]]
 
 
+
+# =========================
+# Obtener mercados desde archivo local JSON
+# =========================
+def get_markets_from_json():
+
+    with open("markets.json", "r") as f:
+        data = json.load(f)
+
+    if "universe" not in data:
+        print("Error: falta 'universe'")
+        return []
+
+    return [asset["name"] for asset in data["universe"]]
+
 # =========================
 # Obtener candles
 # =========================
@@ -252,6 +302,40 @@ def get_candles(symbol, interval="3d", limit=200):
     df["close"] = df["c"].astype(float)
 
     return df
+
+
+# =========================
+# salvar candles
+# =========================
+def save_candles(symbol, interval, df):
+
+    for _, row in df.iterrows():
+
+        cursor.execute("""
+            INSERT OR IGNORE INTO candles (
+                symbol,
+                interval,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                candle_time
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            symbol,
+            interval,
+            float(row["o"]),
+            float(row["h"]),
+            float(row["l"]),
+            float(row["c"]),
+            float(row["v"]),
+            row["t"]
+        ))
+
+    conn.commit()
+    #conn.close()
 
 
 # =========================
@@ -354,6 +438,36 @@ def get_market_data():
     return market_data
 
 
+
+# =========================
+# guarda market data
+# =========================
+def save_market_data(market_data):
+
+    for symbol, data in market_data.items():
+
+        cursor.execute("""
+            INSERT INTO market_snapshots (
+                symbol,
+                funding,
+                open_interest,
+                volume_24h,
+                price,
+                change_24h
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            symbol,
+            data["funding"],
+            data["open_interest"],
+            data["volume_24h"],
+            data["price"],
+            data["change_24h"]
+        ))
+
+    conn.commit()
+
+
 # =========================
 # Calcular volumen relativo
 # =========================
@@ -414,6 +528,8 @@ def compute_short_score(
 
     oi_vol_ratio = oi / volume_24h
 
+    log_message(f"2. RISK {symbol} | oi_vol_ratio:{oi_vol_ratio} | oi:{oi} | volume_24h:{volume_24h} ")
+
     if oi_vol_ratio > 5:
         score -= 2  # leverage alto / riesgo / low liquidity
     elif oi_vol_ratio > 2:
@@ -426,6 +542,8 @@ def compute_short_score(
     # =====================
     # 3. BIAS (lo más importante)
     # =====================
+
+    log_message(f"3. BIAS {symbol} | rsi:{rsi} | funding:{funding} ")
 
     # RSI EXTREMO
     if rsi >= 80:
@@ -494,6 +612,8 @@ def compute_short_score(
     # 5. MOMENTUM EXPANSION
     # =====================
 
+    log_message(f"5. MOMENTUM {symbol} | oi_delta:{oi_delta} | rvol:{rvol} | rsi:{rsi} ")
+
     # expansión saludable / crowding
     if oi_delta > 3 and 0.5 <= rvol <= 1.2 and rsi >= 65:
         score += 0.5
@@ -505,12 +625,14 @@ def compute_short_score(
     # =====================
     # 5.5 PRICE EFFICIENCY
     # =====================
-    # eficiencia: cuánto se mueve el precio
+    # Eficiencia cuánto se mueve el precio
     # relativo al nuevo positioning (OI)
     
     price_response = price_change_pct_24h / max(abs(oi_delta), 1)
 
     oi_threshold = get_dynamic_oi_threshold(symbol)
+
+    log_message(f"5.5 PEFF {symbol} | price_response:{price_response} | oiΔ:{oi_delta} | oith:{oi_threshold} ")
 
     # mucha exposición nueva
     if oi_delta > oi_threshold:
@@ -546,6 +668,8 @@ def compute_short_score(
     # 6. CONTEXT
     # =====================
 
+    log_message(f"6. CONTEXT {symbol} | oi:{oi} | rsi:{rsi} | rvol:{rvol} ")
+
     # OI alto SOLO ayuda si hay debilidad
     if oi > 10_000_000 and rsi >= 70 and rvol < 1.2:
         score += 1
@@ -570,6 +694,8 @@ def compute_short_score(
     if bearish_cvd_div < 0 and rsi >= 70:
          score += 2    
 
+    log_message(f"   ")
+
     return round(score, 1)
 
 
@@ -590,6 +716,7 @@ def detect_cvd_signal(df, lookback=10):
         return 1
 
     return 0
+
 
 def get_dynamic_oi_threshold(symbol, window=50):
 
@@ -846,12 +973,12 @@ def classify_from_score(score, rsi, funding, rvol, oi_delta):
         return "🟡"
 
     # ⚠️ SHORT SETUP
-    if 4 <= score < 7: # 🟠
+    if 4 <= score < 7:
         return "🟡"
 
     # ⚠️ WEAK EDGE
     if 2 <= score < 4:
-        return "🟡"
+        return "🟠"
 
     return "🔴"
 
@@ -1060,7 +1187,12 @@ def run_scanner():
     cleanup_old_data()
 
     markets = get_markets()
+    #markets = get_markets_from_json()
+
     market_data = get_market_data()
+
+    save_market_data(market_data)
+
     results = []
 
     print(f"\nBuscando activos con RSI({RSI_PERIOD}) > {RSI_THRESHOLD} en 3D...\n")
@@ -1082,8 +1214,10 @@ def run_scanner():
                 continue
 
             df_rsi = get_candles(symbol, interval="3d")
+            save_candles(symbol, "3d", df_rsi) #----------------
 
             df_rvol = get_candles(symbol, interval="4h")
+            save_candles(symbol, "4h", df_rvol) #----------------
 
             if df_rsi is None:
                 continue
@@ -1173,7 +1307,7 @@ def run_scanner():
     results = sorted(results, key=lambda x: x["rsi"], reverse=True)
 
     print("=" * 122)
-    log_message("=" * 120)
+    #log_message("=" * 120)
 
     if not results:
         print(f"\nNo hay activos con RSI > {RSI_THRESHOLD}")
@@ -1207,10 +1341,10 @@ def run_scanner():
             )
 
             print(line1)
-            log_message(line2)
+            #log_message(line2)
 
     print("=" * 122)
-    log_message("=" * 120)
+    #log_message("=" * 120)
 
 
 if __name__ == "__main__":
