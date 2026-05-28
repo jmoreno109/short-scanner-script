@@ -43,6 +43,18 @@ def is_blacklisted(symbol):
 
 
 # =========================
+# Define el log scanner
+# =========================
+def log_message(message):
+    # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.now().strftime("%m-%d %H:%M")
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"[{timestamp}] {message}\n")
+        # f.write(f"{message}\n")
+
+
+
+# =========================
 # Calcular OI Delta
 # =========================
 def get_oi_delta(symbol, current_oi):
@@ -251,27 +263,70 @@ def calculate_rsi(df, period=RSI_PERIOD):
 # Obtener funding y Open Interest
 # =========================
 
+# def get_market_data():
+
+#     cursor.execute("""
+
+#         SELECT ms.symbol,
+#                ms.funding,
+#                ms.open_interest,
+#                ms.volume_24h,
+#                ms.price,
+#                ms.change_24h
+
+#         FROM market_snapshots ms
+
+#         INNER JOIN (
+#             SELECT symbol, MAX(created_at) AS max_time
+#             FROM market_snapshots
+#             GROUP BY symbol
+#         ) latest
+
+#         ON ms.symbol = latest.symbol
+#         AND ms.created_at = latest.max_time
+
+#     """)
+
+#     rows = cursor.fetchall()
+
+#     #conn.close()
+
+#     market_data = {}
+
+#     for row in rows:
+
+#         symbol = row[0]
+
+#         market_data[symbol] = {
+#             "funding": row[1],
+#             "open_interest": row[2],
+#             "volume_24h": row[3],
+#             "price": row[4],
+#             "change_24h": row[5],
+#         }
+
+#     return market_data
+
 def get_market_data():
 
     cursor.execute("""
 
-        SELECT ms.symbol,
-               ms.funding,
-               ms.open_interest,
-               ms.volume_24h,
-               ms.price,
-               ms.change_24h
-
-        FROM market_snapshots ms
-
+        SELECT
+            ms.symbol,
+            ms.funding,
+            ms.open_interest,
+            ms.volume_24h,
+            ms.price,
+            ms.change_24h
+        FROM market_snapshots AS ms
         INNER JOIN (
-            SELECT symbol, MAX(created_at) AS max_time
+            SELECT
+                symbol,
+                MAX(id) AS max_id
             FROM market_snapshots
             GROUP BY symbol
         ) latest
-
-        ON ms.symbol = latest.symbol
-        AND ms.created_at = latest.max_time
+        ON ms.id = latest.max_id
 
     """)
 
@@ -296,6 +351,61 @@ def get_market_data():
     return market_data
 
 
+def get_price_change_4h(symbol, current_price):
+
+    cursor.execute(
+        """
+        SELECT price
+        FROM scanner_history
+        WHERE symbol = ?
+        AND timestamp <= CAST(strftime('%s', 'now', '-4 hours') AS INTEGER)
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (symbol,)
+    )
+
+    row = cursor.fetchone()
+
+    if not row:
+        return 0
+
+    old_price = row[0]
+
+    if old_price <= 0:
+        return 0
+
+    return ((current_price - old_price) / old_price) * 100
+
+
+def get_price_change_hours(symbol, current_price, hours=4):
+
+    cursor.execute(
+        """
+        SELECT price
+        FROM scanner_history
+        WHERE symbol = ?
+        AND timestamp <= CAST(strftime('%s', 'now', ?) AS INTEGER)
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (symbol, f"-{hours} hours")
+    )
+
+    row = cursor.fetchone()
+
+    if not row:
+        return 0
+
+    old_price = row[0]
+
+    if old_price <= 0:
+        return 0
+
+    return ((current_price - old_price) / old_price) * 100
+
+
+
 # =========================
 # Calcular volumen relativo
 # =========================
@@ -317,26 +427,214 @@ def calculate_relative_volume(df):
     return round(rvol, 2)
 
 
-# =========================
-# Obtiene K/M/B automático
-# =========================
-def format_number(num):
-    if num >= 1_000_000_000:
-        return f"{num/1_000_000_000:.1f}B"
-    elif num >= 1_000_000:
-        return f"{num/1_000_000:.1f}M"
-    elif num >= 1_000:
-        return f"{num/1_000:.1f}K"
-    # return str(num)
-    return f"{num:,.0f}"
+# # =========================
+# # Obtiene K/M/B automático
+# # =========================
+# def format_number(num):
+#     if num >= 1_000_000_000:
+#         return f"{num/1_000_000_000:.1f}B"
+#     elif num >= 1_000_000:
+#         return f"{num/1_000_000:.1f}M"
+#     elif num >= 1_000:
+#         return f"{num/1_000:.1f}K"
+#     # return str(num)
+#     return f"{num:,.0f}"
+
+
+# # ========================================
+# # Score multi-factor + quant system básico
+# # ========================================
+# def compute_short_score(
+#     rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cvd_div, price_change_pct_24h, symbol
+# ):
+
+#     # =====================
+#     # 1. LIQUIDITY GATE (FILTRO DURO)
+#     # =====================
+
+#     if volume_24h < 500_000:
+#         return -5  # basura / no tradear
+
+#     score = 0
+
+#     # =====================
+#     # 2. RISK (estructura de liquidez) (OI / VOL)
+#     # =====================
+#     # > 5 → Mercado muy especulativo / scalping / posible manipulación
+#     # 2 – 5 → Mercado pesado / apalancado / alta rotación / ruido
+#     # 1 – 2 → Normal / sano / Zona saludable
+#     # < 1 → Mercado muy activo vs tamaño del OI
+
+#     oi_vol_ratio = oi / volume_24h
+
+#     if oi_vol_ratio > 5:
+#         score -= 2  # leverage alto / riesgo / low liquidity
+#     elif oi_vol_ratio > 2:
+#         score -= 1  # speculative
+#     elif 1 <= oi_vol_ratio <= 2:
+#         score += 0.5  # neutral / balanced market
+#     else:
+#         score += 0  # mercado muy activo / alta rotación / flujo agresivo
+
+#     # =====================
+#     # 3. BIAS (lo más importante)
+#     # =====================
+
+#     # RSI EXTREMO
+#     if rsi >= 75:
+#         score += 4
+#     elif rsi >= 70:
+#         score += 3
+#     elif rsi >= 65:
+#         score += 1
+#     else:
+#         score -= 1  # no hay sobrecompra real
+
+#     # FUNDING
+#     if funding > 0.03 and rsi >= 70:
+#         score += 3  # euforia extrema
+#     elif funding > 0.01:
+#         score += 2
+#     elif funding > 0.002:
+#         score += 1
+#     elif funding < -0.02:
+#         score -= 2  # riesgo de short squeeze
+
+#     # =====================
+#     # 4. CONFIRMATION
+#     # =====================
+
+#     # OI DELTA
+#     if oi_delta > 1 and rsi >= 70:
+#         score += 2
+
+#     elif oi_delta > 1 and rsi < 60:
+#         score += 0
+
+#     # RVOL (CALIBRADO PARA 4h)
+#     # Agotamiento  0.05 - 0.40
+#     # Normal       0.5  - 1.0
+#     # Expansion    1.2  - 2.0
+#     # Squeeze momentum 2.5+
+
+#     # agotamiento extremo
+#     if rvol < 0.5 and rsi >= 70:
+#         score += 3
+
+#     # agotamiento moderado
+#     elif rvol < 0.8 and rsi >= 70:
+#         score += 2
+
+#     # volumen normal
+#     elif rvol < 1.2:
+#         score -= 0.5
+
+#     # mercado caliente
+#     elif rvol < 2.0:
+#         score -= 1.5
+
+#     # continuation fuerte
+#     elif rvol < 3.0:
+#         score -= 3
+
+#     # expansión explosiva
+#     else:
+#         score -= 5
+
+#     # =====================
+#     # 5. MOMENTUM EXPANSION
+#     # =====================
+
+#     # expansión saludable / crowding
+#     if oi_delta > 3 and 0.5 <= rvol <= 1.2 and rsi >= 65:
+#         score += 0.5
+
+#     # momentum peligroso contra short
+#     if oi_delta > 3 and rvol > 2.0:
+#         score -= 2
+
+#     # =====================
+#     # 5.5 PRICE EFFICIENCY
+#     # =====================
+#     # eficiencia:
+#     # cuánto se mueve el precio
+#     # relativo al nuevo positioning (OI)
+
+#     efficiency = abs(price_change_pct_24h) / max(abs(oi_delta), 1)
+
+#     # mucha exposición nueva
+#     if oi_delta > 6:  # 7-8
+
+#         # Muchos longs entrando pero el precio ya ni responde
+#         # Absorción fuerte / agotamiento
+#         # Empieza a entrar mucho OI, pero el precio ya no acelera igual.
+#         if efficiency < 0.25:
+#             score += 4
+
+#         # Agotamiento moderado
+#         elif efficiency < 0.50:
+#             score += 2
+
+#         # El precio todavía responde bien al nuevo OI
+#         # Trend saludable / continuation saludable
+#         elif efficiency > 1:
+#             score -= 3
+
+#     # longs entrando
+#     # pero el precio ya negativo
+#     # MUY bearish
+#     if oi_delta > 5 and price_change_pct_24h < 0 and rsi >= 70:
+#         score += 5
+
+#     # =====================
+#     # 6. CONTEXT
+#     # =====================
+
+#     # OI alto SOLO ayuda si hay debilidad
+#     if oi > 10_000_000 and rsi >= 70 and rvol < 1.2:
+#         score += 1
+
+#     # OI bajo = manipulable
+#     if oi < 5_000_000:
+#         score -= 4
+
+#     elif oi < 10_000_000:
+#         score -= 3
+
+#     elif oi < 20_000_000:
+#         score -= 2
+
+#     # Liquidez suficiente
+#     if volume_24h > 1_000_000:
+#         score += 0.5
+
+#     # =====================
+#     # 7. CVD DIVERGENCE
+#     # =====================
+
+#     if bearish_cvd_div < 0 and rsi >= 70:
+#         score += 2
+
+#     return round(score, 1)
 
 
 # ========================================
 # Score multi-factor + quant system básico
 # ========================================
 def compute_short_score(
-    rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cvd_div, price_change_pct_24h
+    rsi,
+    funding,
+    oi,
+    oi_delta,
+    rvol,
+    volume_24h,
+    bearish_cvd_div,
+    price_change_pct_24h,
+    symbol,
 ):
+
+    oi_threshold = get_dynamic_oi_threshold(symbol)
+    oi_strength = abs(oi_delta) / max(oi_threshold, 1) # -- observar
 
     # =====================
     # 1. LIQUIDITY GATE (FILTRO DURO)
@@ -359,10 +657,13 @@ def compute_short_score(
 
     if oi_vol_ratio > 5:
         score -= 2  # leverage alto / riesgo / low liquidity
+
     elif oi_vol_ratio > 2:
         score -= 1  # speculative
+
     elif 1 <= oi_vol_ratio <= 2:
         score += 0.5  # neutral / balanced market
+
     else:
         score += 0  # mercado muy activo / alta rotación / flujo agresivo
 
@@ -371,7 +672,9 @@ def compute_short_score(
     # =====================
 
     # RSI EXTREMO
-    if rsi >= 75:
+    if rsi >= 80:
+        score += 5
+    elif rsi >= 75:
         score += 4
     elif rsi >= 70:
         score += 3
@@ -395,11 +698,26 @@ def compute_short_score(
     # =====================
 
     # OI DELTA
-    if oi_delta > 1 and rsi >= 70:
+    # if oi_delta > 3 and rsi >= 75:
+    #     score += 3
+
+    # elif oi_delta > 1 and rsi >= 70:
+    #     score += 2
+
+    # elif oi_delta > 1 and rsi < 60:
+    #     score += 0
+
+    # OI DELTA / POSITIONING STRENGTH
+    if oi_strength > 1.0 and rsi >= 75:
+        score += 3
+
+    elif oi_strength > 0.5 and rsi >= 70:
         score += 2
 
-    elif oi_delta > 1 and rsi < 60:
+    elif oi_strength > 0.5 and rsi < 60:
         score += 0
+
+
 
     # RVOL (CALIBRADO PARA 4h)
     # Agotamiento  0.05 - 0.40
@@ -435,46 +753,78 @@ def compute_short_score(
     # 5. MOMENTUM EXPANSION
     # =====================
 
+    # # expansión saludable / crowding
+    # if oi_delta > 3 and 0.5 <= rvol <= 1.2 and rsi >= 65:
+    #     score += 0.5
+
+    # # momentum peligroso contra short
+    # if oi_delta > 3 and rvol > 2.0:
+    #     score -= 2
+
     # expansión saludable / crowding
-    if oi_delta > 3 and 0.5 <= rvol <= 1.2 and rsi >= 65:
+    if oi_strength > 1.0 and 0.5 <= rvol <= 1.2 and rsi >= 65:
         score += 0.5
 
     # momentum peligroso contra short
-    if oi_delta > 3 and rvol > 2.0:
+    if oi_strength > 1.0 and rvol > 2.0:
         score -= 2
 
     # =====================
     # 5.5 PRICE EFFICIENCY
     # =====================
-    # eficiencia:
-    # cuánto se mueve el precio
+    # Eficiencia cuánto se mueve el precio
     # relativo al nuevo positioning (OI)
 
-    efficiency = abs(price_change_pct_24h) / max(abs(oi_delta), 1)
+    price_response = price_change_pct_24h / max(abs(oi_delta), 1)
 
-    # mucha exposición nueva
-    if oi_delta > 6:  # 7-8
+    # oi_threshold = get_dynamic_oi_threshold(symbol)
+    # oi_strength = abs(oi_delta) / max(oi_threshold, 1) # -- observar
 
-        # Muchos longs entrando pero el precio ya ni responde
-        # Absorción fuerte / agotamiento
-        # Empieza a entrar mucho OI, pero el precio ya no acelera igual.
-        if efficiency < 0.25:
+    log_message(
+        f"{symbol} "
+        f"oi_delta={oi_delta:.2f} "
+        f"threshold={oi_threshold:.2f} "
+        f"ratio={oi_delta / oi_threshold:.2f} "
+        f"strength={oi_strength:.2f} "
+        f"price_response={price_response:.3f} "
+        f"price_change_pct={price_change_pct_24h:.3f} "
+    )
+
+
+    # Mucha exposición nueva, filtras ruido
+    # Solo analizas eficiencia cuando el positioning realmente importa.
+    #if oi_strength > 1.0:
+    if oi_delta > oi_threshold:
+
+        # El deterioro es muy fuerte
+        if price_response <= -0.5:
+            score += 7
+
+        # longs atrapados nuevo OI perdiendo dinero
+        elif -0.5 < price_response < 0:
+            score += 6
+
+        # Longs entrando pero el precio ya ni responde Absorción fuerte / agotamiento
+        # Empieza a entrar mucho OI, pero el precio ya no acelera igual
+        elif 0 <= price_response < 0.25:
             score += 4
 
         # Agotamiento moderado
-        elif efficiency < 0.50:
+        elif 0.25 <= price_response < 0.50:
             score += 2
+
+        # continuation moderada
+        elif 0.50 <= price_response < 1.0:
+            score -= 1
 
         # El precio todavía responde bien al nuevo OI
         # Trend saludable / continuation saludable
-        elif efficiency > 1:
+        elif 1.0 <= price_response < 2.0:
             score -= 3
 
-    # longs entrando
-    # pero el precio ya negativo
-    # MUY bearish
-    if oi_delta > 5 and price_change_pct_24h < 0 and rsi >= 70:
-        score += 5
+        # squeeze / expansion agresiva
+        elif price_response >= 2.0:
+            score -= 5
 
     # =====================
     # 6. CONTEXT
@@ -501,11 +851,36 @@ def compute_short_score(
     # =====================
     # 7. CVD DIVERGENCE
     # =====================
-
     if bearish_cvd_div < 0 and rsi >= 70:
         score += 2
 
     return round(score, 1)
+
+
+def get_dynamic_oi_threshold(symbol, window=50):
+
+    cursor.execute(
+        """
+        SELECT oi_delta
+        FROM scanner_history
+        WHERE symbol = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        (symbol, window),
+    )
+
+    rows = cursor.fetchall()
+
+    if len(rows) < 10:
+        return 5
+
+    deltas = [abs(r[0]) for r in rows if r[0] is not None]
+
+    if not deltas:
+        return 5
+
+    return min(50, max(5, np.percentile(deltas, 95)))
 
 
 # ========================================
@@ -929,7 +1304,7 @@ def run_scanner():
 
             volume_24h = market_data.get(symbol, {}).get("volume_24h", 0)
 
-            change_24h = market_data.get(symbol, {}).get("change_24h", 0)
+            #change_24h = market_data.get(symbol, {}).get("change_24h", 0)            
 
             # 1. Liquidez
             if volume_24h < 1_000_000:
@@ -957,6 +1332,7 @@ def run_scanner():
             # ---
 
             funding = market_data.get(symbol, {}).get("funding", 0) * 100
+            #funding = market_data.get(symbol, {}).get("funding", 0)
 
             oi = market_data.get(symbol, {}).get("open_interest", 0)
 
@@ -968,6 +1344,9 @@ def run_scanner():
 
             price_direction = get_price_direction(price, previous_price)
 
+            #change_24h = get_price_change_4h(symbol, price) # ---------
+            change_24h = get_price_change_hours(symbol, price, 24)
+
             score = compute_short_score(
                 # rsi, funding, oi, oi_delta, rv, volume_24h, bearish_cvd_div, change_24h
                 rsi,
@@ -978,6 +1357,7 @@ def run_scanner():
                 volume_24h,
                 cvd_signal,
                 change_24h,
+                symbol,
             )
 
             efficiency = abs(change_24h) / max(abs(oi_delta), 1)
