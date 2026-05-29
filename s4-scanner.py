@@ -8,14 +8,14 @@ from fnmatch import fnmatch
 from datetime import datetime
 import numpy as np
 
-LOG_FILE = "short_scanner.log"
+LOG_FILE = "zscore_scanner.log"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--rsi", type=float, default=70)
 args = parser.parse_args()
 RSI_THRESHOLD = args.rsi
 
-#BASE_URL = "https://api.hyperliquid.xyz/info"
+# BASE_URL = "https://api.hyperliquid.xyz/info"
 RSI_PERIOD = 14
 VOL_WINDOW = 20
 REQUEST_DELAY = 0.25
@@ -50,8 +50,6 @@ def log_message(message):
     timestamp = datetime.now().strftime("%m-%d %H:%M")
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"[{timestamp}] {message}\n")
-        # f.write(f"{message}\n")
-
 
 
 # =========================
@@ -104,22 +102,6 @@ def cleanup_old_data():
 # =========================
 # Obtener mercados
 # =========================
-# def get_markets():
-#     payload = {"type": "meta"}
-
-#     r = requests.post(BASE_URL, json=payload)
-#     data = r.json()
-
-#     if "universe" not in data:
-#         print("Error: respuesta inválida del API, falta 'universe'")
-#         return []
-
-#     return [asset["name"] for asset in data["universe"]]
-
-
-# =========================
-# Obtener mercados
-# =========================
 def get_markets():
 
     cursor.execute("""
@@ -131,32 +113,6 @@ def get_markets():
     rows = cursor.fetchall()
 
     return [row[0] for row in rows]
-
-
-# =========================
-# Obtener candles
-# =========================
-# def get_candles(symbol, interval="3d", limit=200):
-#     payload = {
-#         "type": "candleSnapshot",
-#         "req": {"coin": symbol, "interval": interval, "startTime": 0},
-#     }
-
-#     r = requests.post(BASE_URL, json=payload)
-
-#     if r.status_code != 200:
-#         return None
-
-#     data = r.json()
-
-#     if not data:
-#         return None
-
-#     df = pd.DataFrame(data)
-
-#     df["close"] = df["c"].astype(float)
-
-#     return df
 
 
 # =========================
@@ -216,123 +172,36 @@ def calculate_rsi(df, period=RSI_PERIOD):
 # =========================
 # Obtener funding y Open Interest
 # =========================
-# def get_market_data():
-#     payload = {"type": "metaAndAssetCtxs"}
-
-#     r = requests.post(BASE_URL, json=payload)
-#     data = r.json()
-
-#     if len(data) < 2 or "universe" not in data[0]:
-#         print("Error: respuesta inválida del API para datos de mercado")
-#         return {}
-
-#     universe = data[0]["universe"]
-#     contexts = data[1]
-
-#     market_data = {}
-
-#     for asset, ctx in zip(universe, contexts):
-
-#         symbol = asset["name"]
-#         funding = float(ctx.get("funding", 0))
-#         volume_24h = float(ctx.get("dayNtlVlm", 0))
-#         open_interest = float(ctx.get("openInterest", 0))
-#         price = float(ctx.get("markPx", 0))
-#         oi_usd = open_interest * price
-
-#         prev_day_price = float(ctx.get("prevDayPx", 0))
-#         if prev_day_price > 0:
-#             change_24h = ((price - prev_day_price) / prev_day_price) * 100
-#         else:
-#             change_24h = 0
-
-#         market_data[symbol] = {
-#             "funding": funding,
-#             "open_interest": oi_usd,
-#             "volume_24h": volume_24h,
-#             "price": price,
-#             "change_24h": change_24h,
-#         }
-
-#     return market_data
-
-
-
-
-# =========================
-# Obtener funding y Open Interest
-# =========================
-
-# def get_market_data():
-
-#     cursor.execute("""
-
-#         SELECT ms.symbol,
-#                ms.funding,
-#                ms.open_interest,
-#                ms.volume_24h,
-#                ms.price,
-#                ms.change_24h
-
-#         FROM market_snapshots ms
-
-#         INNER JOIN (
-#             SELECT symbol, MAX(created_at) AS max_time
-#             FROM market_snapshots
-#             GROUP BY symbol
-#         ) latest
-
-#         ON ms.symbol = latest.symbol
-#         AND ms.created_at = latest.max_time
-
-#     """)
-
-#     rows = cursor.fetchall()
-
-#     #conn.close()
-
-#     market_data = {}
-
-#     for row in rows:
-
-#         symbol = row[0]
-
-#         market_data[symbol] = {
-#             "funding": row[1],
-#             "open_interest": row[2],
-#             "volume_24h": row[3],
-#             "price": row[4],
-#             "change_24h": row[5],
-#         }
-
-#     return market_data
-
 def get_market_data():
 
     cursor.execute("""
-
         SELECT
-            ms.symbol,
-            ms.funding,
-            ms.open_interest,
-            ms.volume_24h,
-            ms.price,
-            ms.change_24h
-        FROM market_snapshots AS ms
+            sh.symbol,
+            sh.timestamp,
+            sh.price,
+            sh.rsi,
+            sh.rvol,
+            sh.funding,
+            sh.oi,
+            sh.oi_delta,
+            sh.efficiency,
+            sh.volume_24h,
+            sh.score,
+            sh.price_change_24h,
+            sh.bearish_cvd_div
+        FROM scanner_history AS sh
         INNER JOIN (
             SELECT
                 symbol,
-                MAX(id) AS max_id
-            FROM market_snapshots
+                MAX(timestamp) AS max_timestamp
+            FROM scanner_history
             GROUP BY symbol
         ) latest
-        ON ms.id = latest.max_id
-
+        ON sh.symbol = latest.symbol
+        AND sh.timestamp = latest.max_timestamp
     """)
 
     rows = cursor.fetchall()
-
-    #conn.close()
 
     market_data = {}
 
@@ -341,16 +210,26 @@ def get_market_data():
         symbol = row[0]
 
         market_data[symbol] = {
-            "funding": row[1],
-            "open_interest": row[2],
-            "volume_24h": row[3],
-            "price": row[4],
-            "change_24h": row[5],
+            "timestamp": row[1],
+            "price": row[2],
+            "rsi": row[3],
+            "rvol": row[4],
+            "funding": row[5],
+            "open_interest": row[6],
+            "oi_delta": row[7],
+            "efficiency": row[8],
+            "volume_24h": row[9],
+            "score": row[10],
+            "change_24h": row[11],
+            "bearish_cvd_div": row[12],
         }
 
     return market_data
 
 
+# =========================
+# Obtener el precio 4h
+# =========================
 def get_price_change_4h(symbol, current_price):
 
     cursor.execute(
@@ -362,7 +241,7 @@ def get_price_change_4h(symbol, current_price):
         ORDER BY timestamp DESC
         LIMIT 1
         """,
-        (symbol,)
+        (symbol,),
     )
 
     row = cursor.fetchone()
@@ -378,6 +257,9 @@ def get_price_change_4h(symbol, current_price):
     return ((current_price - old_price) / old_price) * 100
 
 
+# =========================
+# Obtener el precio by hours
+# =========================
 def get_price_change_hours(symbol, current_price, hours=4):
 
     cursor.execute(
@@ -389,7 +271,7 @@ def get_price_change_hours(symbol, current_price, hours=4):
         ORDER BY timestamp DESC
         LIMIT 1
         """,
-        (symbol, f"-{hours} hours")
+        (symbol, f"-{hours} hours"),
     )
 
     row = cursor.fetchone()
@@ -405,13 +287,11 @@ def get_price_change_hours(symbol, current_price, hours=4):
     return ((current_price - old_price) / old_price) * 100
 
 
-
 # =========================
 # Calcular volumen relativo
 # =========================
 def calculate_relative_volume(df):
 
-    #volume = df["v"].astype(float)
     volume = df["volume"].astype(float)
 
     # excluir vela actual incompleta
@@ -425,197 +305,6 @@ def calculate_relative_volume(df):
     rvol = current_volume / average_volume
 
     return round(rvol, 2)
-
-
-# # =========================
-# # Obtiene K/M/B automático
-# # =========================
-# def format_number(num):
-#     if num >= 1_000_000_000:
-#         return f"{num/1_000_000_000:.1f}B"
-#     elif num >= 1_000_000:
-#         return f"{num/1_000_000:.1f}M"
-#     elif num >= 1_000:
-#         return f"{num/1_000:.1f}K"
-#     # return str(num)
-#     return f"{num:,.0f}"
-
-
-# # ========================================
-# # Score multi-factor + quant system básico
-# # ========================================
-# def compute_short_score(
-#     rsi, funding, oi, oi_delta, rvol, volume_24h, bearish_cvd_div, price_change_pct_24h, symbol
-# ):
-
-#     # =====================
-#     # 1. LIQUIDITY GATE (FILTRO DURO)
-#     # =====================
-
-#     if volume_24h < 500_000:
-#         return -5  # basura / no tradear
-
-#     score = 0
-
-#     # =====================
-#     # 2. RISK (estructura de liquidez) (OI / VOL)
-#     # =====================
-#     # > 5 → Mercado muy especulativo / scalping / posible manipulación
-#     # 2 – 5 → Mercado pesado / apalancado / alta rotación / ruido
-#     # 1 – 2 → Normal / sano / Zona saludable
-#     # < 1 → Mercado muy activo vs tamaño del OI
-
-#     oi_vol_ratio = oi / volume_24h
-
-#     if oi_vol_ratio > 5:
-#         score -= 2  # leverage alto / riesgo / low liquidity
-#     elif oi_vol_ratio > 2:
-#         score -= 1  # speculative
-#     elif 1 <= oi_vol_ratio <= 2:
-#         score += 0.5  # neutral / balanced market
-#     else:
-#         score += 0  # mercado muy activo / alta rotación / flujo agresivo
-
-#     # =====================
-#     # 3. BIAS (lo más importante)
-#     # =====================
-
-#     # RSI EXTREMO
-#     if rsi >= 75:
-#         score += 4
-#     elif rsi >= 70:
-#         score += 3
-#     elif rsi >= 65:
-#         score += 1
-#     else:
-#         score -= 1  # no hay sobrecompra real
-
-#     # FUNDING
-#     if funding > 0.03 and rsi >= 70:
-#         score += 3  # euforia extrema
-#     elif funding > 0.01:
-#         score += 2
-#     elif funding > 0.002:
-#         score += 1
-#     elif funding < -0.02:
-#         score -= 2  # riesgo de short squeeze
-
-#     # =====================
-#     # 4. CONFIRMATION
-#     # =====================
-
-#     # OI DELTA
-#     if oi_delta > 1 and rsi >= 70:
-#         score += 2
-
-#     elif oi_delta > 1 and rsi < 60:
-#         score += 0
-
-#     # RVOL (CALIBRADO PARA 4h)
-#     # Agotamiento  0.05 - 0.40
-#     # Normal       0.5  - 1.0
-#     # Expansion    1.2  - 2.0
-#     # Squeeze momentum 2.5+
-
-#     # agotamiento extremo
-#     if rvol < 0.5 and rsi >= 70:
-#         score += 3
-
-#     # agotamiento moderado
-#     elif rvol < 0.8 and rsi >= 70:
-#         score += 2
-
-#     # volumen normal
-#     elif rvol < 1.2:
-#         score -= 0.5
-
-#     # mercado caliente
-#     elif rvol < 2.0:
-#         score -= 1.5
-
-#     # continuation fuerte
-#     elif rvol < 3.0:
-#         score -= 3
-
-#     # expansión explosiva
-#     else:
-#         score -= 5
-
-#     # =====================
-#     # 5. MOMENTUM EXPANSION
-#     # =====================
-
-#     # expansión saludable / crowding
-#     if oi_delta > 3 and 0.5 <= rvol <= 1.2 and rsi >= 65:
-#         score += 0.5
-
-#     # momentum peligroso contra short
-#     if oi_delta > 3 and rvol > 2.0:
-#         score -= 2
-
-#     # =====================
-#     # 5.5 PRICE EFFICIENCY
-#     # =====================
-#     # eficiencia:
-#     # cuánto se mueve el precio
-#     # relativo al nuevo positioning (OI)
-
-#     efficiency = abs(price_change_pct_24h) / max(abs(oi_delta), 1)
-
-#     # mucha exposición nueva
-#     if oi_delta > 6:  # 7-8
-
-#         # Muchos longs entrando pero el precio ya ni responde
-#         # Absorción fuerte / agotamiento
-#         # Empieza a entrar mucho OI, pero el precio ya no acelera igual.
-#         if efficiency < 0.25:
-#             score += 4
-
-#         # Agotamiento moderado
-#         elif efficiency < 0.50:
-#             score += 2
-
-#         # El precio todavía responde bien al nuevo OI
-#         # Trend saludable / continuation saludable
-#         elif efficiency > 1:
-#             score -= 3
-
-#     # longs entrando
-#     # pero el precio ya negativo
-#     # MUY bearish
-#     if oi_delta > 5 and price_change_pct_24h < 0 and rsi >= 70:
-#         score += 5
-
-#     # =====================
-#     # 6. CONTEXT
-#     # =====================
-
-#     # OI alto SOLO ayuda si hay debilidad
-#     if oi > 10_000_000 and rsi >= 70 and rvol < 1.2:
-#         score += 1
-
-#     # OI bajo = manipulable
-#     if oi < 5_000_000:
-#         score -= 4
-
-#     elif oi < 10_000_000:
-#         score -= 3
-
-#     elif oi < 20_000_000:
-#         score -= 2
-
-#     # Liquidez suficiente
-#     if volume_24h > 1_000_000:
-#         score += 0.5
-
-#     # =====================
-#     # 7. CVD DIVERGENCE
-#     # =====================
-
-#     if bearish_cvd_div < 0 and rsi >= 70:
-#         score += 2
-
-#     return round(score, 1)
 
 
 # ========================================
@@ -633,21 +322,40 @@ def compute_short_score(
     symbol,
 ):
 
+    
     oi_threshold = get_dynamic_oi_threshold(symbol)
-    oi_strength = abs(oi_delta) / max(oi_threshold, 1) # -- observar
+    oi_strength = abs(oi_delta) / max(oi_threshold, 1)  # -- observar
+    price_response = price_change_pct_24h / max(abs(oi_delta), 1)
 
-    # =====================
+    risk_symbol = "INJ"
+
+    if symbol == risk_symbol:
+        log_message(
+            f"{symbol} "
+            f"rsi = {rsi:.2f} "
+            f"oi = {oi:.2f} "
+            f"oi_delta = {oi_delta:.2f} "
+            f"threshold = {oi_threshold:.2f} "
+            #f"ratio = {oi_delta / oi_threshold:.2f} "
+            f"strength = {oi_strength:.2f} "
+            f"rvol = {rvol:.3f} "
+            f"price_change = {price_change_pct_24h:.3f} "            
+        )
+
+    # =================================
     # 1. LIQUIDITY GATE (FILTRO DURO)
-    # =====================
+    # =================================
 
     if volume_24h < 500_000:
         return -5  # basura / no tradear
+        if symbol == risk_symbol:
+            log_message(f"1. LIQUIDITY {symbol} score -= 5")
 
     score = 0
 
-    # =====================
+    # =============================================
     # 2. RISK (estructura de liquidez) (OI / VOL)
-    # =====================
+    # =============================================
     # > 5 → Mercado muy especulativo / scalping / posible manipulación
     # 2 – 5 → Mercado pesado / apalancado / alta rotación / ruido
     # 1 – 2 → Normal / sano / Zona saludable
@@ -657,67 +365,94 @@ def compute_short_score(
 
     if oi_vol_ratio > 5:
         score -= 2  # leverage alto / riesgo / low liquidity
+        if symbol == risk_symbol:
+            log_message(f"2. RISK {symbol} score -= 2")
 
     elif oi_vol_ratio > 2:
         score -= 1  # speculative
+        if symbol == risk_symbol:
+            log_message(f"2. RISK {symbol} score -= 1")
 
     elif 1 <= oi_vol_ratio <= 2:
         score += 0.5  # neutral / balanced market
+        if symbol == risk_symbol:
+            log_message(f"2. RISK {symbol} score += 0.5")
 
     else:
         score += 0  # mercado muy activo / alta rotación / flujo agresivo
+        if symbol == risk_symbol:
+            log_message(f"2. RISK {symbol} score += 0")
 
-    # =====================
+    # =============================
     # 3. BIAS (lo más importante)
-    # =====================
+    # =============================
 
     # RSI EXTREMO
     if rsi >= 80:
         score += 5
+        if symbol == risk_symbol:
+            log_message(f"3. BIAS {symbol} score += 5")
+
     elif rsi >= 75:
         score += 4
+        if symbol == risk_symbol:
+            log_message(f"3. BIAS {symbol} score += 4")
+
     elif rsi >= 70:
         score += 3
+        if symbol == risk_symbol:
+            log_message(f"3. BIAS {symbol} score += 3")
+
     elif rsi >= 65:
         score += 1
+        if symbol == risk_symbol:
+            log_message(f"3. BIAS {symbol} score += 1")
+
     else:
         score -= 1  # no hay sobrecompra real
+        if symbol == risk_symbol:
+            log_message(f"3. BIAS {symbol} score -= 1")
 
     # FUNDING
     if funding > 0.03 and rsi >= 70:
         score += 3  # euforia extrema
+        if symbol == risk_symbol:
+            log_message(f"3. BIAS {symbol} score += 3")
+
     elif funding > 0.01:
         score += 2
+        if symbol == risk_symbol:
+            log_message(f"3. BIAS {symbol} score += 2")
+
     elif funding > 0.002:
         score += 1
+        if symbol == risk_symbol:
+            log_message(f"3. BIAS {symbol} score += 1")
+
     elif funding < -0.02:
         score -= 2  # riesgo de short squeeze
+        if symbol == risk_symbol:
+            log_message(f"3. BIAS {symbol} score -= 2")
 
     # =====================
     # 4. CONFIRMATION
     # =====================
 
-    # OI DELTA
-    # if oi_delta > 3 and rsi >= 75:
-    #     score += 3
-
-    # elif oi_delta > 1 and rsi >= 70:
-    #     score += 2
-
-    # elif oi_delta > 1 and rsi < 60:
-    #     score += 0
-
     # OI DELTA / POSITIONING STRENGTH
     if oi_strength > 1.0 and rsi >= 75:
         score += 3
+        if symbol == risk_symbol:
+            log_message(f"4. CONFIR {symbol} score += 3")
 
     elif oi_strength > 0.5 and rsi >= 70:
         score += 2
+        if symbol == risk_symbol:
+            log_message(f"4. CONFIR {symbol} score += 2")
 
     elif oi_strength > 0.5 and rsi < 60:
         score += 0
-
-
+        if symbol == risk_symbol:
+            log_message(f"4. CONFIR {symbol} score += 0")
 
     # RVOL (CALIBRADO PARA 4h)
     # Agotamiento  0.05 - 0.40
@@ -728,103 +463,108 @@ def compute_short_score(
     # agotamiento extremo
     if rvol < 0.5 and rsi >= 70:
         score += 3
+        if symbol == risk_symbol:
+            log_message(f"4. CONFIR {symbol} score += 3")
 
     # agotamiento moderado
     elif rvol < 0.8 and rsi >= 70:
         score += 2
+        if symbol == risk_symbol:
+            log_message(f"4. CONFIR {symbol} score += 2")
 
     # volumen normal
     elif rvol < 1.2:
         score -= 0.5
+        if symbol == risk_symbol:
+            log_message(f"4. CONFIR {symbol} score -= 0.5")
 
     # mercado caliente
     elif rvol < 2.0:
         score -= 1.5
+        if symbol == risk_symbol:
+            log_message(f"4. CONFIR {symbol} score -= 1.5")
 
     # continuation fuerte
     elif rvol < 3.0:
         score -= 3
+        if symbol == risk_symbol:
+            log_message(f"4. CONFIR {symbol} score -= 3")
 
     # expansión explosiva
     else:
         score -= 5
+        if symbol == risk_symbol:
+            log_message(f"4. CONFIR {symbol} score -= 5")
 
-    # =====================
+    # =========================
     # 5. MOMENTUM EXPANSION
-    # =====================
-
-    # # expansión saludable / crowding
-    # if oi_delta > 3 and 0.5 <= rvol <= 1.2 and rsi >= 65:
-    #     score += 0.5
-
-    # # momentum peligroso contra short
-    # if oi_delta > 3 and rvol > 2.0:
-    #     score -= 2
+    # =========================
 
     # expansión saludable / crowding
     if oi_strength > 1.0 and 0.5 <= rvol <= 1.2 and rsi >= 65:
         score += 0.5
+        if symbol == risk_symbol:
+            log_message(f"5. MOMEN {symbol} score += 0.5")
 
     # momentum peligroso contra short
     if oi_strength > 1.0 and rvol > 2.0:
         score -= 2
+        if symbol == risk_symbol:
+            log_message(f"5. MOMEN {symbol} score -= 2")
 
-    # =====================
+    # =========================
     # 5.5 PRICE EFFICIENCY
-    # =====================
-    # Eficiencia cuánto se mueve el precio
-    # relativo al nuevo positioning (OI)
-
-    price_response = price_change_pct_24h / max(abs(oi_delta), 1)
-
-    # oi_threshold = get_dynamic_oi_threshold(symbol)
-    # oi_strength = abs(oi_delta) / max(oi_threshold, 1) # -- observar
-
-    log_message(
-        f"{symbol} "
-        f"oi_delta={oi_delta:.2f} "
-        f"threshold={oi_threshold:.2f} "
-        f"ratio={oi_delta / oi_threshold:.2f} "
-        f"strength={oi_strength:.2f} "
-        f"price_response={price_response:.3f} "
-        f"price_change_pct={price_change_pct_24h:.3f} "
-    )
-
+    # =========================
+    # Eficiencia cuánto se mueve el precio, relativo al nuevo positioning (OI)
 
     # Mucha exposición nueva, filtras ruido
     # Solo analizas eficiencia cuando el positioning realmente importa.
-    #if oi_strength > 1.0:
+    # if oi_strength > 1.0:
     if oi_delta > oi_threshold:
 
         # El deterioro es muy fuerte
         if price_response <= -0.5:
             score += 7
+            if symbol == risk_symbol:
+                log_message(f"5.5 PRICE {symbol} score += 7")            
 
         # longs atrapados nuevo OI perdiendo dinero
         elif -0.5 < price_response < 0:
             score += 6
+            if symbol == risk_symbol:
+                log_message(f"5.5 PRICE {symbol} score += 6")
 
         # Longs entrando pero el precio ya ni responde Absorción fuerte / agotamiento
         # Empieza a entrar mucho OI, pero el precio ya no acelera igual
         elif 0 <= price_response < 0.25:
             score += 4
+            if symbol == risk_symbol:
+                log_message(f"5.5 PRICE {symbol} score += 4")
 
         # Agotamiento moderado
         elif 0.25 <= price_response < 0.50:
             score += 2
+            if symbol == risk_symbol:
+                log_message(f"5.5 PRICE {symbol} score += 2")
 
         # continuation moderada
         elif 0.50 <= price_response < 1.0:
             score -= 1
+            if symbol == risk_symbol:
+                log_message(f"5.5 PRICE {symbol} score -= 1")
 
         # El precio todavía responde bien al nuevo OI
         # Trend saludable / continuation saludable
         elif 1.0 <= price_response < 2.0:
             score -= 3
+            if symbol == risk_symbol:
+                log_message(f"5.5 PRICE {symbol} score -= 3")
 
         # squeeze / expansion agresiva
         elif price_response >= 2.0:
             score -= 5
+            if symbol == risk_symbol:
+                log_message(f"5.5 PRICE {symbol} score -= 5")
 
     # =====================
     # 6. CONTEXT
@@ -833,30 +573,48 @@ def compute_short_score(
     # OI alto SOLO ayuda si hay debilidad
     if oi > 10_000_000 and rsi >= 70 and rvol < 1.2:
         score += 1
+        if symbol == risk_symbol:
+            log_message(f"6. CONT {symbol} score += 1")
 
     # OI bajo = manipulable
     if oi < 5_000_000:
         score -= 4
+        if symbol == risk_symbol:
+            log_message(f"6. CONT {symbol} score -= 4")
 
     elif oi < 10_000_000:
         score -= 3
+        if symbol == risk_symbol:
+            log_message(f"6. CONT {symbol} score -= 3")
 
     elif oi < 20_000_000:
         score -= 2
+        if symbol == risk_symbol:
+            log_message(f"6. CONT {symbol} score -= 2")
 
     # Liquidez suficiente
     if volume_24h > 1_000_000:
         score += 0.5
+        if symbol == risk_symbol:
+            log_message(f"6. CONT {symbol} score += 0.5")
 
     # =====================
     # 7. CVD DIVERGENCE
     # =====================
     if bearish_cvd_div < 0 and rsi >= 70:
         score += 2
+        if symbol == risk_symbol:
+            log_message(f"7. CVD {symbol} score += 2")
+
+    if symbol == risk_symbol:
+        log_message("=" * 120)
 
     return round(score, 1)
 
 
+# ========================================
+# Obtiene el oi_threshold de forma dinamica
+# ========================================
 def get_dynamic_oi_threshold(symbol, window=50):
 
     cursor.execute(
@@ -1009,6 +767,9 @@ def final_score(trend, positioning, absorption):
     return round(score, 2)
 
 
+# =====================
+# classify_from_score
+# =====================
 def classify_from_score(score, rsi, funding, rvol, oi_delta):
 
     # 🔥 STRONG SHORT
@@ -1044,7 +805,7 @@ def classify_from_score(score, rsi, funding, rvol, oi_delta):
 # =========================
 def calculate_pseudo_cvd(df):
 
-    #volume = df["v"].astype(float)
+    # volume = df["v"].astype(float)
     volume = df["volume"].astype(float)
 
     delta = []
@@ -1094,25 +855,9 @@ def detect_bearish_cvd_divergence(df, lookback=10):
     return price_higher_high and cvd_lower_high
 
 
-# def detect_cvd_signal0(df, lookback=10):
-
-#     recent_price_high = df["close"].iloc[-lookback:].max()
-#     previous_price_high = df["close"].iloc[-lookback * 2 : -lookback].max()
-
-#     recent_cvd_high = df["cvd"].iloc[-lookback:].max()
-#     previous_cvd_high = df["cvd"].iloc[-lookback * 2 : -lookback].max()
-
-#     # bearish divergence
-#     if recent_price_high > previous_price_high and recent_cvd_high < previous_cvd_high:
-#         return "🔻"
-
-#     # bullish confirmation
-#     if recent_price_high > previous_price_high and recent_cvd_high > previous_cvd_high:
-#         return "🟢"
-
-#     return "➖"
-
-
+# =========================
+# detect_cvd_signal
+# =========================
 def detect_cvd_signal(df, lookback=10):
 
     recent_price_high = df["close"].iloc[-lookback:].max()
@@ -1132,6 +877,9 @@ def detect_cvd_signal(df, lookback=10):
     return 0
 
 
+# =========================
+# get_cvd_label
+# =========================
 def get_cvd_label(cvd_div):
 
     # bearish divergence
@@ -1213,13 +961,6 @@ def get_funding_label(funding):
         return "🟢"
     else:
         return "🔴"
-
-
-# def get_cvd_label(cvd_div):
-
-#     if cvd_div:
-#         return "🟢"
-#     return "🔴"
 
 
 def get_oi_label(oi):
@@ -1304,8 +1045,6 @@ def run_scanner():
 
             volume_24h = market_data.get(symbol, {}).get("volume_24h", 0)
 
-            #change_24h = market_data.get(symbol, {}).get("change_24h", 0)            
-
             # 1. Liquidez
             if volume_24h < 1_000_000:
                 continue
@@ -1320,23 +1059,19 @@ def run_scanner():
             if len(df_rsi) < VOL_WINDOW:
                 continue
 
-            rsi = calculate_rsi(df_rsi)
+            rsi = market_data.get(symbol, {}).get("rsi", 0)
 
-            rv = calculate_relative_volume(df_rvol)
+            rv = market_data.get(symbol, {}).get("rvol", 0)
 
             df_cvd = calculate_pseudo_cvd(df_rvol)
 
-            # ---
-            # bearish_cvd_div = detect_bearish_cvd_divergence(df_cvd)
             cvd_signal = detect_cvd_signal(df_cvd)
-            # ---
 
-            funding = market_data.get(symbol, {}).get("funding", 0) * 100
-            #funding = market_data.get(symbol, {}).get("funding", 0)
+            funding = market_data.get(symbol, {}).get("funding", 0)
 
             oi = market_data.get(symbol, {}).get("open_interest", 0)
 
-            oi_delta = get_oi_delta(symbol, oi)
+            oi_delta = market_data.get(symbol, {}).get("oi_delta", 0)
 
             price = market_data.get(symbol, {}).get("price", 0)
 
@@ -1344,11 +1079,9 @@ def run_scanner():
 
             price_direction = get_price_direction(price, previous_price)
 
-            #change_24h = get_price_change_4h(symbol, price) # ---------
-            change_24h = get_price_change_hours(symbol, price, 24)
+            change_24h = market_data.get(symbol, {}).get("change_24h", 0)
 
             score = compute_short_score(
-                # rsi, funding, oi, oi_delta, rv, volume_24h, bearish_cvd_div, change_24h
                 rsi,
                 funding,
                 oi,
@@ -1366,17 +1099,15 @@ def run_scanner():
 
             risk_label = get_risk_label(oi, volume_24h)
 
-            # -----------------------------------------------
             trend = trend_score(rsi, rv)
+
             positioning = positioning_score(oi, funding, oi_delta)
 
-            # absorption = absorption_score(change_24h, oi_delta, bearish_cvd_div)
             absorption = absorption_score(change_24h, oi_delta, cvd_signal)
 
             fscore = final_score(trend, positioning, absorption)
 
             signal_prom = classify_signal(trend, positioning, absorption)
-            # -----------------------------------------------
 
             # oi > 10_000_000 and volume_24h > 1_000_000 and rv > 0.8
             if rsi > RSI_THRESHOLD and oi > 0:
@@ -1438,6 +1169,3 @@ def run_scanner():
 if __name__ == "__main__":
     run_scanner()
 
-    # while True:
-    #     run_scanner()
-    #     time.sleep(3600)

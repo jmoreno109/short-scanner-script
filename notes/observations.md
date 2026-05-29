@@ -1,5 +1,4 @@
 
-
 # Para dejarlo “en segundo plano” realmente 
 # Ejecutarlo con nohup
 
@@ -10,10 +9,11 @@ nohup /home/mint/hscanner/hlbot/bin/python s3-scanner.py --rsi 60 > nohup-scanne
 
 ps aux | grep s3-scanner.py
 pgrep -af scanner.py
-tail -f scanner.log
 htop
 
 pkill -f s3-scanner.py
+kill PID
+kill -9 1234
 
 
 # systemd service

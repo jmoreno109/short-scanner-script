@@ -9,7 +9,7 @@ from datetime import datetime
 import numpy as np
 import json
 
-LOG_FILE = "short_scanner.log"
+LOG_FILE = "zshort_scanner.log"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--rsi", type=float, default=70)
@@ -20,8 +20,8 @@ BASE_URL = "https://api.hyperliquid.xyz/info"
 RSI_PERIOD = 14
 VOL_WINDOW = 20
 REQUEST_DELAY = 0.25
-#HISTORY_RETENTION_SECONDS = 604800  # 7 days
-HISTORY_RETENTION_SECONDS = 2592000 # 30 days
+# HISTORY_RETENTION_SECONDS = 604800  # 7 days
+HISTORY_RETENTION_SECONDS = 2592000  # 30 days
 
 DB_NAME = "scanner.db"
 conn = sqlite3.connect(DB_NAME)
@@ -67,12 +67,20 @@ conn.commit()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS market_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT,
-    funding REAL,
-    open_interest REAL,
-    volume_24h REAL,
+    symbol TEXT,    
     price REAL,
-    change_24h REAL,
+    rsi REAL,
+    rvol REAL,
+    funding REAL,
+    oi REAL,
+    oi_delta REAL,
+    oi_threshold REAL,
+    oi_strength  REAL,
+    efficiency REAL,
+    volume_24h REAL,    
+    price_change_24h REAL,
+    cvd_div INTEGER,
+    score REAL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 """)
@@ -342,54 +350,6 @@ def save_candles(symbol, interval, df):
 
 
 # =========================
-# Obtener candles
-# =========================
-# def get_candles(symbol, interval="3d", limit=200):
-
-#     payload = {
-#         "type": "candleSnapshot",
-#         "req": {
-#             "coin": symbol,
-#             "interval": interval,
-#             "startTime": 0,
-#         },
-#     }
-
-#     r = requests.post(BASE_URL, json=payload)
-
-#     if r.status_code != 200:
-#         return None
-
-#     data = r.json()
-
-#     if not data:
-#         return None
-
-#     # limitar cantidad
-#     data = data[-limit:]
-
-#     df = pd.DataFrame(data)
-
-#     # convertir columnas numéricas
-#     numeric_cols = ["o", "h", "l", "c", "v"]
-
-#     for col in numeric_cols:
-#         df[col] = pd.to_numeric(df[col], errors="coerce")
-
-#     # alias útiles
-#     df["open"] = df["o"]
-#     df["high"] = df["h"]
-#     df["low"] = df["l"]
-#     df["close"] = df["c"]
-#     df["volume"] = df["v"]
-
-#     # limpiar NaN
-#     df = df.dropna()
-
-#     return df
-
-
-# =========================
 # Calcular RSI
 # =========================
 def calculate_rsi(df, period=RSI_PERIOD):
@@ -453,10 +413,10 @@ def save_market_data(market_data):
             INSERT INTO market_snapshots (
                 symbol,
                 funding,
-                open_interest,
+                oi,
                 volume_24h,
                 price,
-                change_24h
+                price_change_24h
             )
             VALUES (?, ?, ?, ?, ?, ?)
         """,
@@ -817,7 +777,6 @@ def format_number(num):
 #         score += 0
 
 
-
 #     # RVOL (CALIBRADO PARA 4h)
 #     # Agotamiento  0.05 - 0.40
 #     # Normal       0.5  - 1.0
@@ -968,7 +927,7 @@ def compute_short_score(
 ):
 
     oi_threshold = get_dynamic_oi_threshold(symbol)
-    oi_strength = abs(oi_delta) / max(oi_threshold, 1) # -- observar
+    oi_strength = abs(oi_delta) / max(oi_threshold, 1)  # -- observar
 
     # =====================
     # 1. LIQUIDITY GATE (FILTRO DURO)
@@ -1051,8 +1010,6 @@ def compute_short_score(
     elif oi_strength > 0.5 and rsi < 60:
         score += 0
 
-
-
     # RVOL (CALIBRADO PARA 4h)
     # Agotamiento  0.05 - 0.40
     # Normal       0.5  - 1.0
@@ -1124,10 +1081,9 @@ def compute_short_score(
         f"price_change_pct={price_change_pct_24h:.3f} "
     )
 
-
     # Mucha exposición nueva, filtras ruido
     # Solo analizas eficiencia cuando el positioning realmente importa.
-    #if oi_strength > 1.0:
+    # if oi_strength > 1.0:
     if oi_delta > oi_threshold:
 
         # El deterioro es muy fuerte
@@ -1233,7 +1189,8 @@ def get_dynamic_oi_threshold(symbol, window=50):
     if not deltas:
         return 5
 
-    return min(50, max(5, np.percentile(deltas, 95)))
+    #return min(50, max(5, np.percentile(deltas, 95))) 
+    return min(50, max(5, np.percentile(deltas, 85)))
 
 
 # def get_dynamic_oi_threshold(symbol, window=30):
@@ -1495,6 +1452,75 @@ def get_rvol_label(rvol):
     return "🟢"
 
 
+# def update_market_data(symbol, rsi):
+
+#     cursor.execute(
+#         """
+#         UPDATE market_snapshots
+#         SET rsi = ?
+#         WHERE id = (
+#             SELECT id
+#             FROM market_snapshots
+#             WHERE symbol = ?
+#             ORDER BY id DESC
+#             LIMIT 1
+#         )
+#     """,
+#         (rsi, symbol),
+#     )
+
+#     conn.commit()
+
+
+# def update_market_data(symbol, rsi, rvol, oi_delta, oi_threshold, oi_strength):
+def update_market_data(
+    symbol,
+    rsi,
+    rvol,
+    oi_delta,
+    oi_threshold,
+    oi_strength,
+    price_response,
+    cvd_signal,
+    score,
+):
+
+    cursor.execute(
+        """
+        UPDATE market_snapshots
+        SET 
+            rsi = ?,
+            rvol = ?,
+            oi_delta = ?,
+            oi_threshold = ?,
+            oi_strength = ?,
+            efficiency = ?,
+            cvd_div = ?,
+            score = ?
+        WHERE id = (
+            SELECT id
+            FROM market_snapshots
+            WHERE symbol = ?
+            ORDER BY id DESC
+            LIMIT 1
+        )
+    """,
+        (
+            rsi,
+            rvol,
+            oi_delta,
+            oi_threshold,
+            oi_strength,
+            price_response,
+            cvd_signal,
+            score,
+            symbol,
+        ),
+    )
+
+    conn.commit()
+
+
 # =========================
 # Scanner principal
 # =========================
@@ -1506,7 +1532,6 @@ def run_scanner():
     # markets = get_markets_from_json()
 
     market_data = get_market_data()
-
     save_market_data(market_data)
 
     results = []
@@ -1557,6 +1582,13 @@ def run_scanner():
 
             save_oi_snapshot(symbol, oi)
 
+            oi_threshold = get_dynamic_oi_threshold(symbol)
+
+            if symbol == "NEAR":
+                log_message(f"{symbol} TEST oi_threshold = {oi_threshold}")
+
+            oi_strength = abs(oi_delta) / max(oi_threshold, 1)
+
             price = market_data.get(symbol, {}).get("price", 0)
 
             previous_price = get_previous_price(symbol)
@@ -1579,6 +1611,18 @@ def run_scanner():
 
             # efficiency = abs(change_24h) / max(abs(oi_delta), 1)
             price_response = change_24h / max(abs(oi_delta), 1)
+
+            update_market_data(
+                symbol,
+                rsi,
+                rv,
+                oi_delta,
+                oi_threshold,
+                oi_strength,
+                price_response,
+                cvd_signal,
+                score,
+            )
 
             save_scanner_snapshot(
                 symbol=symbol,
@@ -1652,8 +1696,11 @@ def run_scanner():
 
 
 if __name__ == "__main__":
-    #run_scanner()
+    run_scanner()
 
-    while True:
-        run_scanner()
-        time.sleep(500)
+    # while True:
+    #     try:
+    #         run_scanner()
+    #     except Exception as e:
+    #         print(e)
+    #     time.sleep(1600)
