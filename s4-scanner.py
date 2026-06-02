@@ -15,7 +15,6 @@ parser.add_argument("--rsi", type=float, default=70)
 args = parser.parse_args()
 RSI_THRESHOLD = args.rsi
 
-# BASE_URL = "https://api.hyperliquid.xyz/info"
 RSI_PERIOD = 14
 VOL_WINDOW = 20
 REQUEST_DELAY = 0.25
@@ -30,6 +29,87 @@ with open("blacklist.txt", "r", encoding="utf-8") as f:
     BLACKLIST = [
         line.strip() for line in f if line.strip() and not line.startswith("#")
     ]
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS analysis_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT,
+    price REAL,
+    rsi REAL,
+    score REAL,
+    bullish_exhaustion_pct REAL,
+    short_opportunity_pct REAL,
+    distribution_pct REAL,
+    long_trap_pct REAL,
+    smart_money_exit_pct REAL,
+    reversal_pct REAL,
+    cvd_signal INTEGER,
+    timestamp INTEGER DEFAULT (strftime('%s','now')),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(
+        symbol,
+        price,
+        score,
+        bullish_exhaustion_pct,
+        short_opportunity_pct,
+        distribution_pct,
+        long_trap_pct,
+        smart_money_exit_pct,
+        reversal_pct,
+        cvd_signal
+    )
+)
+""")
+conn.commit()
+
+
+def save_analysis_snapshot(
+    symbol,
+    price,
+    rsi,
+    score,
+    bullish_exhaustion_pct,
+    short_opportunity_pct,
+    distribution_pct,
+    long_trap_pct,
+    smart_money_exit_pct,
+    reversal_pct,
+    cvd_signal,
+):
+
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO analysis_snapshots (
+            symbol,
+            price,
+            rsi,
+            score,
+            bullish_exhaustion_pct,
+            short_opportunity_pct,
+            distribution_pct,
+            long_trap_pct,
+            smart_money_exit_pct,
+            reversal_pct,
+            cvd_signal 
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            symbol,
+            price,
+            rsi,
+            score,
+            bullish_exhaustion_pct,
+            short_opportunity_pct,
+            distribution_pct,
+            long_trap_pct,
+            smart_money_exit_pct,
+            reversal_pct,
+            cvd_signal,
+        ),
+    )
+
+    conn.commit()
 
 
 # =========================
@@ -46,7 +126,6 @@ def is_blacklisted(symbol):
 # Define el log scanner
 # =========================
 def log_message(message):
-    # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     timestamp = datetime.now().strftime("%m-%d %H:%M")
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"[{timestamp}] {message}\n")
@@ -228,36 +307,6 @@ def get_market_data():
 
 
 # =========================
-# Obtener el precio 4h
-# =========================
-def get_price_change_4h(symbol, current_price):
-
-    cursor.execute(
-        """
-        SELECT price
-        FROM scanner_history
-        WHERE symbol = ?
-        AND timestamp <= CAST(strftime('%s', 'now', '-4 hours') AS INTEGER)
-        ORDER BY timestamp DESC
-        LIMIT 1
-        """,
-        (symbol,),
-    )
-
-    row = cursor.fetchone()
-
-    if not row:
-        return 0
-
-    old_price = row[0]
-
-    if old_price <= 0:
-        return 0
-
-    return ((current_price - old_price) / old_price) * 100
-
-
-# =========================
 # Obtener el precio by hours
 # =========================
 def get_price_change_hours(symbol, current_price, hours=4):
@@ -277,12 +326,12 @@ def get_price_change_hours(symbol, current_price, hours=4):
     row = cursor.fetchone()
 
     if not row:
-        return 0
+        return None
 
     old_price = row[0]
 
     if old_price <= 0:
-        return 0
+        return None
 
     return ((current_price - old_price) / old_price) * 100
 
@@ -307,9 +356,70 @@ def calculate_relative_volume(df):
     return round(rvol, 2)
 
 
-# ========================================
-# Score multi-factor + quant system básico
-# ========================================
+# =========================
+# score multi-factor + quant system básico
+# =========================
+def compute_short_score_new(
+    rsi,
+    funding,
+    oi,
+    oi_delta,
+    rvol,
+    volume_24h,
+    bearish_cvd_div,
+    price_change_pct_24h,
+    symbol,
+):
+
+    score = 0
+
+    # RSI
+    if rsi >= 80:
+        score += 5
+    elif rsi >= 75:
+        score += 4
+    elif rsi >= 70:
+        score += 3
+    elif rsi >= 65:
+        score += 1
+
+    # RSI Sobrecomprado
+    if rsi > 65:
+
+        # Funding (crowded longs = bearish)
+        if funding > 0.01:
+            score += 2
+        elif funding > 0:
+            score += 1
+        elif funding < -0.02:
+            score -= 2  # squeeze risk (peligro)
+
+        # OI Delta (flujo)
+        if oi_delta > 1:
+            score += 2
+        elif oi_delta < -1:
+            score += 1
+
+        # RVOL (debilidad o exceso)
+        if rvol < 0.5:
+            score += 2  # debilidad → bueno para short
+        elif rvol > 1.5:
+            score -= 1  # momentum fuerte contra short
+
+    # Open Interest (liquidez)
+    if oi > 10_000_000:
+        score += 1
+
+    # volumen (confirmación de interés)
+    if volume_24h > 1_000_000:
+        score += 1
+
+    return score
+
+
+# =========================
+# score multi-factor + quant system básico
+# =========================
 def compute_short_score(
     rsi,
     funding,
@@ -322,40 +432,36 @@ def compute_short_score(
     symbol,
 ):
 
-    
     oi_threshold = get_dynamic_oi_threshold(symbol)
-    oi_strength = abs(oi_delta) / max(oi_threshold, 1)  # -- observar
+    oi_strength = abs(oi_delta) / max(oi_threshold, 1)
     price_response = price_change_pct_24h / max(abs(oi_delta), 1)
 
-    risk_symbol = "INJ"
+    log_message(
+        f"{symbol} "
+        f"oi_delta={oi_delta:.2f} "
+        f"threshold={oi_threshold:.2f} "
+        f"ratio={oi_delta / oi_threshold:.2f} "
+        f"strength={oi_strength:.2f} "
+        f"price_response={price_response:.3f} "
+        f"price_change_pct={price_change_pct_24h:.3f} "
+    )
 
+    risk_symbol = "NEAR"
     if symbol == risk_symbol:
-        log_message(
-            f"{symbol} "
-            f"rsi = {rsi:.2f} "
-            f"oi = {oi:.2f} "
-            f"oi_delta = {oi_delta:.2f} "
-            f"threshold = {oi_threshold:.2f} "
-            #f"ratio = {oi_delta / oi_threshold:.2f} "
-            f"strength = {oi_strength:.2f} "
-            f"rvol = {rvol:.3f} "
-            f"price_change = {price_change_pct_24h:.3f} "            
-        )
+        log_message(f"2.RISK {symbol} score += 1")
 
-    # =================================
+    # =====================
     # 1. LIQUIDITY GATE (FILTRO DURO)
-    # =================================
+    # =====================
 
     if volume_24h < 500_000:
         return -5  # basura / no tradear
-        if symbol == risk_symbol:
-            log_message(f"1. LIQUIDITY {symbol} score -= 5")
 
     score = 0
 
-    # =============================================
+    # =====================
     # 2. RISK (estructura de liquidez) (OI / VOL)
-    # =============================================
+    # =====================
     # > 5 → Mercado muy especulativo / scalping / posible manipulación
     # 2 – 5 → Mercado pesado / apalancado / alta rotación / ruido
     # 1 – 2 → Normal / sano / Zona saludable
@@ -365,74 +471,41 @@ def compute_short_score(
 
     if oi_vol_ratio > 5:
         score -= 2  # leverage alto / riesgo / low liquidity
-        if symbol == risk_symbol:
-            log_message(f"2. RISK {symbol} score -= 2")
 
     elif oi_vol_ratio > 2:
         score -= 1  # speculative
-        if symbol == risk_symbol:
-            log_message(f"2. RISK {symbol} score -= 1")
 
     elif 1 <= oi_vol_ratio <= 2:
-        score += 0.5  # neutral / balanced market
-        if symbol == risk_symbol:
-            log_message(f"2. RISK {symbol} score += 0.5")
+        score += 1  # neutral / balanced market
 
     else:
         score += 0  # mercado muy activo / alta rotación / flujo agresivo
-        if symbol == risk_symbol:
-            log_message(f"2. RISK {symbol} score += 0")
 
-    # =============================
+    # =====================
     # 3. BIAS (lo más importante)
-    # =============================
+    # =====================
 
     # RSI EXTREMO
     if rsi >= 80:
         score += 5
-        if symbol == risk_symbol:
-            log_message(f"3. BIAS {symbol} score += 5")
-
     elif rsi >= 75:
         score += 4
-        if symbol == risk_symbol:
-            log_message(f"3. BIAS {symbol} score += 4")
-
     elif rsi >= 70:
         score += 3
-        if symbol == risk_symbol:
-            log_message(f"3. BIAS {symbol} score += 3")
-
     elif rsi >= 65:
         score += 1
-        if symbol == risk_symbol:
-            log_message(f"3. BIAS {symbol} score += 1")
-
     else:
         score -= 1  # no hay sobrecompra real
-        if symbol == risk_symbol:
-            log_message(f"3. BIAS {symbol} score -= 1")
 
     # FUNDING
     if funding > 0.03 and rsi >= 70:
         score += 3  # euforia extrema
-        if symbol == risk_symbol:
-            log_message(f"3. BIAS {symbol} score += 3")
-
     elif funding > 0.01:
         score += 2
-        if symbol == risk_symbol:
-            log_message(f"3. BIAS {symbol} score += 2")
-
     elif funding > 0.002:
         score += 1
-        if symbol == risk_symbol:
-            log_message(f"3. BIAS {symbol} score += 1")
-
     elif funding < -0.02:
         score -= 2  # riesgo de short squeeze
-        if symbol == risk_symbol:
-            log_message(f"3. BIAS {symbol} score -= 2")
 
     # =====================
     # 4. CONFIRMATION
@@ -441,18 +514,12 @@ def compute_short_score(
     # OI DELTA / POSITIONING STRENGTH
     if oi_strength > 1.0 and rsi >= 75:
         score += 3
-        if symbol == risk_symbol:
-            log_message(f"4. CONFIR {symbol} score += 3")
 
     elif oi_strength > 0.5 and rsi >= 70:
         score += 2
-        if symbol == risk_symbol:
-            log_message(f"4. CONFIR {symbol} score += 2")
 
     elif oi_strength > 0.5 and rsi < 60:
         score += 0
-        if symbol == risk_symbol:
-            log_message(f"4. CONFIR {symbol} score += 0")
 
     # RVOL (CALIBRADO PARA 4h)
     # Agotamiento  0.05 - 0.40
@@ -463,59 +530,44 @@ def compute_short_score(
     # agotamiento extremo
     if rvol < 0.5 and rsi >= 70:
         score += 3
-        if symbol == risk_symbol:
-            log_message(f"4. CONFIR {symbol} score += 3")
 
     # agotamiento moderado
     elif rvol < 0.8 and rsi >= 70:
         score += 2
-        if symbol == risk_symbol:
-            log_message(f"4. CONFIR {symbol} score += 2")
 
     # volumen normal
-    elif rvol < 1.2:
-        score -= 0.5
-        if symbol == risk_symbol:
-            log_message(f"4. CONFIR {symbol} score -= 0.5")
+    elif rvol < 1.2 and rsi >= 70:
+        score += 1
 
     # mercado caliente
-    elif rvol < 2.0:
-        score -= 1.5
-        if symbol == risk_symbol:
-            log_message(f"4. CONFIR {symbol} score -= 1.5")
+    elif rvol < 2.0 and rsi >= 70:  # --------------check
+        score += 0
 
     # continuation fuerte
-    elif rvol < 3.0:
-        score -= 3
-        if symbol == risk_symbol:
-            log_message(f"4. CONFIR {symbol} score -= 3")
+    elif rvol < 3.0 and rsi >= 70:
+        score -= 1
 
-    # expansión explosiva
-    else:
-        score -= 5
-        if symbol == risk_symbol:
-            log_message(f"4. CONFIR {symbol} score -= 5")
+    # expansión explosiva # --------------check
+    # else:
+    #     score -= 5
 
-    # =========================
+    # =====================
     # 5. MOMENTUM EXPANSION
-    # =========================
+    # =====================
 
     # expansión saludable / crowding
     if oi_strength > 1.0 and 0.5 <= rvol <= 1.2 and rsi >= 65:
         score += 0.5
-        if symbol == risk_symbol:
-            log_message(f"5. MOMEN {symbol} score += 0.5")
 
     # momentum peligroso contra short
     if oi_strength > 1.0 and rvol > 2.0:
         score -= 2
-        if symbol == risk_symbol:
-            log_message(f"5. MOMEN {symbol} score -= 2")
 
-    # =========================
+    # =====================
     # 5.5 PRICE EFFICIENCY
-    # =========================
-    # Eficiencia cuánto se mueve el precio, relativo al nuevo positioning (OI)
+    # =====================
+    # Eficiencia cuánto se mueve el precio
+    # relativo al nuevo positioning (OI)
 
     # Mucha exposición nueva, filtras ruido
     # Solo analizas eficiencia cuando el positioning realmente importa.
@@ -525,46 +577,32 @@ def compute_short_score(
         # El deterioro es muy fuerte
         if price_response <= -0.5:
             score += 7
-            if symbol == risk_symbol:
-                log_message(f"5.5 PRICE {symbol} score += 7")            
 
         # longs atrapados nuevo OI perdiendo dinero
         elif -0.5 < price_response < 0:
             score += 6
-            if symbol == risk_symbol:
-                log_message(f"5.5 PRICE {symbol} score += 6")
 
         # Longs entrando pero el precio ya ni responde Absorción fuerte / agotamiento
         # Empieza a entrar mucho OI, pero el precio ya no acelera igual
         elif 0 <= price_response < 0.25:
             score += 4
-            if symbol == risk_symbol:
-                log_message(f"5.5 PRICE {symbol} score += 4")
 
         # Agotamiento moderado
         elif 0.25 <= price_response < 0.50:
             score += 2
-            if symbol == risk_symbol:
-                log_message(f"5.5 PRICE {symbol} score += 2")
 
         # continuation moderada
-        elif 0.50 <= price_response < 1.0:
+        elif 0.50 <= price_response < 1.0:  # -------------------------------check
             score -= 1
-            if symbol == risk_symbol:
-                log_message(f"5.5 PRICE {symbol} score -= 1")
 
         # El precio todavía responde bien al nuevo OI
         # Trend saludable / continuation saludable
         elif 1.0 <= price_response < 2.0:
             score -= 3
-            if symbol == risk_symbol:
-                log_message(f"5.5 PRICE {symbol} score -= 3")
 
         # squeeze / expansion agresiva
         elif price_response >= 2.0:
             score -= 5
-            if symbol == risk_symbol:
-                log_message(f"5.5 PRICE {symbol} score -= 5")
 
     # =====================
     # 6. CONTEXT
@@ -573,41 +611,26 @@ def compute_short_score(
     # OI alto SOLO ayuda si hay debilidad
     if oi > 10_000_000 and rsi >= 70 and rvol < 1.2:
         score += 1
-        if symbol == risk_symbol:
-            log_message(f"6. CONT {symbol} score += 1")
 
     # OI bajo = manipulable
     if oi < 5_000_000:
         score -= 4
-        if symbol == risk_symbol:
-            log_message(f"6. CONT {symbol} score -= 4")
 
     elif oi < 10_000_000:
         score -= 3
-        if symbol == risk_symbol:
-            log_message(f"6. CONT {symbol} score -= 3")
 
     elif oi < 20_000_000:
         score -= 2
-        if symbol == risk_symbol:
-            log_message(f"6. CONT {symbol} score -= 2")
 
     # Liquidez suficiente
     if volume_24h > 1_000_000:
         score += 0.5
-        if symbol == risk_symbol:
-            log_message(f"6. CONT {symbol} score += 0.5")
 
     # =====================
     # 7. CVD DIVERGENCE
     # =====================
     if bearish_cvd_div < 0 and rsi >= 70:
         score += 2
-        if symbol == risk_symbol:
-            log_message(f"7. CVD {symbol} score += 2")
-
-    if symbol == risk_symbol:
-        log_message("=" * 120)
 
     return round(score, 1)
 
@@ -767,9 +790,9 @@ def final_score(trend, positioning, absorption):
     return round(score, 2)
 
 
-# =====================
-# classify_from_score
-# =====================
+# ========================================
+# Classify
+# ========================================
 def classify_from_score(score, rsi, funding, rvol, oi_delta):
 
     # 🔥 STRONG SHORT
@@ -777,25 +800,25 @@ def classify_from_score(score, rsi, funding, rvol, oi_delta):
         return "🚀"
 
     # 🔥 STRONG SHORT
-    if score >= 8 and rsi >= 70 and funding > 0 and rvol < 1:
+    if score >= 9 and rsi >= 70 and funding > 0:
         return "🟢"
 
-    # 🔥 STRONG SHORT (confluencia real)
-    # if score >= 7 and rsi >= 72 and funding > 0 and rvol < 0.8 and oi_delta > 0 :
-    if score >= 7 and rsi >= 72 and funding > 0 and rvol < 0.6:
-        return "🟢"
+    # # 🔥 STRONG SHORT (confluencia real)
+    # # if score >= 7 and rsi >= 72 and funding > 0 and rvol < 0.8 and oi_delta > 0 :
+    # if score >= 7 and rsi >= 72 and funding > 0 and rvol < 0.6:
+    #     return "🟢"
 
     # ⚠️ SHORT SETUP
-    if score >= 7:
+    if score >= 9:
         return "🟡"
 
     # ⚠️ SHORT SETUP
-    if 4 <= score < 7:  # 🟠
+    if 5 <= score < 9:
         return "🟡"
 
     # ⚠️ WEAK EDGE
-    if 2 <= score < 4:
-        return "🟡"
+    if 2 <= score < 5:
+        return "🟠"
 
     return "🔴"
 
@@ -1023,6 +1046,304 @@ def classify_signal(trend, positioning, absorption):
 
 
 # =========================
+# Compara el oi_delta actual contra los últimos N períodos.
+# qué tan anómalo es respecto a su propio historial.
+# =========================
+def get_oi_zscore(symbol, current_oi_delta, window=100):
+
+    cursor.execute(
+        """
+        SELECT oi_delta
+        FROM scanner_history
+        WHERE symbol = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+    """,
+        (symbol, window),
+    )
+
+    rows = cursor.fetchall()
+
+    if len(rows) < 20:
+        return 0
+
+    deltas = [abs(r[0]) for r in rows if r[0] is not None]
+
+    mean = np.mean(deltas)
+    std = np.std(deltas)
+
+    if std == 0:
+        return 0
+
+    return (abs(current_oi_delta) - mean) / std
+
+
+# =========================
+# Obtiene K/M/B automático
+# =========================
+def format_number(num):
+    if num >= 1_000_000_000:
+        return f"{num/1_000_000_000:.1f}B"
+    elif num >= 1_000_000:
+        return f"{num/1_000_000:.1f}M"
+    elif num >= 1_000:
+        return f"{num/1_000:.1f}K"
+    # return str(num)
+    return f"{num:,.0f}"
+
+
+def clamp(value, min_value=0, max_value=100):
+    return max(min_value, min(value, max_value))
+
+
+def normalize(value, min_val, max_val):
+    if max_val == min_val:
+        return 0
+    return clamp(((value - min_val) / (max_val - min_val)) * 100)
+
+
+# =========================
+# 1 Exceso Alcista Score
+# Busca activos demasiado sobreextendidos.
+# =========================
+# Valores altos sugieren:
+# Los compradores ya han empujado mucho el precio.
+# La fuerza alcista podría estar perdiendo impulso.
+# Hay mayor riesgo de consolidación o corrección.
+def bullish_exhaustion_score(rsi, rvol, price_change_24h, efficiency):
+
+    # | Score | Estado |
+    # | ----- | ------ |
+    # | <40   | 🟢     |
+    # | 40-70 | 🟡     |
+    # | >70   | 🔴     |
+    # Interpretación: "Subió demasiado rápido. Posible agotamiento."
+
+    score = 0
+
+    if rsi > 80:
+        score += 5
+
+    if rsi > 70:  # 75
+        score += 30
+
+    if rvol > 2:
+        score += 20  # 25
+
+    if price_change_24h > 8:
+        score += 25
+
+    if efficiency > 0.8:
+        score += 20
+
+    return clamp(score)
+
+
+def get_be_label(score):
+
+    if score >= 70:
+        return "🟢"
+
+    elif score >= 40:
+        return "🟡"
+
+    return "🔴"
+
+
+# =========================
+# 2 Short Opportunity Score
+# Combina momentum agotado + derivados débiles.
+# =========================
+def short_opportunity_score(rsi, funding, oi_delta, bearish_cvd_div):
+
+    # | Score  | Lectura   |
+    # | ------ | --------- |
+    # | 0-25   | No        |
+    # | 25-50  | Débil     |
+    # | 50-75  | Buena     |
+    # | 75-100 | Excelente |
+
+    score = 0
+
+    if rsi > 70:
+        score += 25
+
+    if funding > 0.03:
+        score += 25
+
+    if oi_delta < 0:
+        score += 25
+
+    if bearish_cvd_div < 0:
+        score += 25
+
+    return clamp(score)
+
+
+def get_so_label(score):
+
+    # 75-100 Excelente
+    if score >= 75:
+        return "🟢"
+
+    # 50-75 Buena
+    elif score >= 50:
+        return "🟡"
+
+    # 25-50 Débil
+    elif score >= 25:
+        return "🟠"
+
+    # 0-25 No
+    return "🔴"
+
+
+# =========================
+# 3. Distribution Score
+# Semáforo de Distribución Institucional
+# Precio subiendo mientras el interés abierto cae.
+# =========================
+def distribution_score(price_change_24h, oi_delta, bearish_cvd_div):
+
+    # Esto suele significar: El precio sigue subiendo pero los compradores agresivos desaparecen.
+
+    score = 0
+
+    if price_change_24h > 5:
+        score += 40
+
+    if oi_delta < 0:
+        score += 30
+
+    if bearish_cvd_div < 0:
+        score += 30
+
+    return clamp(score)
+
+
+# =========================
+# 4. Long Trap Score
+# Semáforo de Riesgo de Long Trap
+# Normalizado de 0-100.
+# Un score alto significa que el mercado presenta características típicas de un posible Long Trap.
+# ¿Qué tan probable es que los longs que están entrando ahora terminen atrapados por una caída?
+# =========================
+# Valores altos sugieren:
+# Mucha gente está comprando tarde.
+# El mercado puede provocar una subida final para atraer compradores.
+# Luego podría venir una caída brusca.
+def long_trap_score(rsi, funding, rvol, oi_delta):
+
+    # | Trap Score  |
+    # | ----------- |
+    # | <40 Bajo    |
+    # | 40-70 Medio |
+    # | >70 Alto    |
+
+    rsi_score = normalize(rsi, 50, 90)
+
+    funding_score = normalize(funding, 0.0, 0.05)
+
+    rvol_score = normalize(rvol, 1, 4)
+
+    oi_score = normalize(abs(min(oi_delta, 0)), 0, 10)
+
+    score = (
+        rsi_score * 0.30 + funding_score * 0.30 + rvol_score * 0.20 + oi_score * 0.20
+    )
+
+    return round(clamp(score), 2)
+
+
+def get_lt_label(score):
+
+    if score >= 70:
+        return "🟢"
+
+    elif score >= 40:
+        return "🟡"
+
+    return "🔴"
+
+
+# =========================
+# 5. Smart Money Exit Score
+# Detecta cuando el dinero inteligente sale.
+# =========================
+def smart_money_exit_score(oi_delta, efficiency, bearish_cvd_div, funding):
+
+    # Si sale >70:
+    # 🔴 Posible techo local.
+
+    score = 0
+
+    if oi_delta < -2:
+        score += 30
+
+    if efficiency > 0.8:
+        score += 20
+
+    if bearish_cvd_div < 0:
+        score += 30
+
+    if funding > 0:
+        score += 20
+
+    return clamp(score)
+
+
+# =========================
+# 6. Reversal Probability Score
+# Versión simple sin percentiles.
+# Probabilidad de reversión.
+# =========================
+# Valores altos sugieren:
+# El movimiento actual tiene más posibilidades de darse vuelta.
+# No indica necesariamente la magnitud del giro.
+# Puede ser reversión alcista o bajista según el contexto.
+def reversal_probability_score(rsi, rvol, funding, price_change_24h):
+
+    # | Score                  |
+    # | ---------------------- |
+    # | <40 Continuación       |
+    # | 40-60 Neutral          |
+    # | >60 Reversión probable |
+    # | >80 Muy probable       |
+
+    rsi_score = normalize(rsi, 50, 90)
+
+    rvol_score = normalize(rvol, 1, 4)
+
+    funding_score = normalize(funding, 0, 0.05)
+
+    price_score = normalize(price_change_24h, 0, 20)
+
+    score = (
+        rsi_score * 0.30 + rvol_score * 0.25 + funding_score * 0.20 + price_score * 0.25
+    )
+
+    return round(clamp(score), 2)
+
+
+def get_rp_label(score):
+
+    # >70 Muy probable
+    if score >= 70:  # 80
+        return "🟢"
+
+    # >50 Reversión probable
+    elif score >= 50:  # 60
+        return "🟡"
+
+    # 30-50 Neutral
+    elif score >= 30:  # 40
+        return "🟠"
+
+    # <40 Continuación
+    return "🔴"
+
+
+# =========================
 # Scanner principal
 # =========================
 def run_scanner():
@@ -1063,9 +1384,9 @@ def run_scanner():
 
             rv = market_data.get(symbol, {}).get("rvol", 0)
 
-            df_cvd = calculate_pseudo_cvd(df_rvol)
-
-            cvd_signal = detect_cvd_signal(df_cvd)
+            # df_cvd = calculate_pseudo_cvd(df_rvol)
+            # cvd_signal = detect_cvd_signal(df_cvd)
+            cvd_signal = market_data.get(symbol, {}).get("bearish_cvd_div", 0)
 
             funding = market_data.get(symbol, {}).get("funding", 0)
 
@@ -1079,9 +1400,15 @@ def run_scanner():
 
             price_direction = get_price_direction(price, previous_price)
 
-            change_24h = market_data.get(symbol, {}).get("change_24h", 0)
+            price_change_pct = market_data.get(symbol, {}).get("change_24h", 0)
 
-            score = compute_short_score(
+            efficiency = market_data.get(symbol, {}).get("efficiency", 0)
+
+            bearish_cvd_div = market_data.get(symbol, {}).get("bearish_cvd_div", 0)
+
+            score = market_data.get(symbol, {}).get("score", 0)
+
+            score2 = compute_short_score_new(
                 rsi,
                 funding,
                 oi,
@@ -1089,11 +1416,23 @@ def run_scanner():
                 rv,
                 volume_24h,
                 cvd_signal,
-                change_24h,
+                price_change_pct,
                 symbol,
             )
 
-            efficiency = abs(change_24h) / max(abs(oi_delta), 1)
+            be_score = bullish_exhaustion_score(rsi, rv, price_change_pct, efficiency)
+
+            so_score = short_opportunity_score(rsi, funding, oi_delta, bearish_cvd_div)
+
+            di_score = distribution_score(price_change_pct, oi_delta, bearish_cvd_div)
+
+            lt_score = long_trap_score(rsi, funding, rv, oi_delta)
+
+            sme_score = smart_money_exit_score(
+                oi_delta, efficiency, bearish_cvd_div, funding
+            )
+
+            rp_score = reversal_probability_score(rsi, rv, funding, price_change_pct)
 
             signal = classify_from_score(score, rsi, funding, rv, oi_delta)
 
@@ -1103,11 +1442,27 @@ def run_scanner():
 
             positioning = positioning_score(oi, funding, oi_delta)
 
-            absorption = absorption_score(change_24h, oi_delta, cvd_signal)
+            absorption = absorption_score(price_change_pct, oi_delta, cvd_signal)
 
             fscore = final_score(trend, positioning, absorption)
 
             signal_prom = classify_signal(trend, positioning, absorption)
+
+            signal2 = classify_from_score(score2, rsi, funding, rv, oi_delta)
+
+            save_analysis_snapshot(
+                symbol=symbol,
+                price=price,
+                rsi=rsi,
+                score=score,
+                bullish_exhaustion_pct=be_score,
+                short_opportunity_pct=so_score,
+                distribution_pct=di_score,
+                long_trap_pct=lt_score,
+                smart_money_exit_pct=sme_score,
+                reversal_pct=rp_score,
+                cvd_signal=cvd_signal,
+            )
 
             # oi > 10_000_000 and volume_24h > 1_000_000 and rv > 0.8
             if rsi > RSI_THRESHOLD and oi > 0:
@@ -1123,7 +1478,6 @@ def run_scanner():
                         "score": score,
                         "signal": signal,
                         "risk_label": risk_label,
-                        # "cvd_div": bearish_cvd_div,
                         "price_direction": price_direction,
                         "price": price,
                         "fscore": fscore,
@@ -1132,6 +1486,14 @@ def run_scanner():
                         "absorption_score": absorption,
                         "signal_prom": signal_prom,
                         "cvd_signal": cvd_signal,
+                        "score2": score2,
+                        "signal2": signal2,
+                        "be_score": be_score,
+                        "so_score": so_score,
+                        "di_score": di_score,
+                        "lt_score": lt_score,
+                        "sme_score": sme_score,
+                        "rp_score": rp_score,
                     }
                 )
 
@@ -1153,12 +1515,32 @@ def run_scanner():
 
             line1 = (
                 f"{item['symbol'][:6]:<6}  "
-                f"Score({item['signal']}): {item['score']:>5.1f}  "
-                f"Trend: {item['trend_score']:>4.1f}  "
-                f"Positioning: {item['positioning_score']:>4.1f}  "
-                f"Absorption: {item['absorption_score']:>4.1f}  "
-                f"SubScore({item['signal_prom']}): {item['fscore']:>5.1f}  "
-                f"CVD({get_cvd_label(item['cvd_signal'])})"
+                f"PX:{item['price']:>7.2f}  "
+                # f"RSI: {item['rsi']:>5.2f}  "
+                f"SCO({item['signal']}):{item['score']:>5.1f}  "
+                # f"Scol({item['signal2']}):{item['score2']:>5.1f}  "
+                f"BE({get_be_label(item['be_score'])}): {item['be_score']:>5.1f}%  "
+                # f"SO({get_so_label(item['so_score'])}): {item['so_score']:>5.1f}%  "
+                # f"DI:{item['di_score']:>5.1f}  "
+                f"LT({get_lt_label(item['lt_score'])}): {item['lt_score']:>5.1f}%  "
+                # f"SMEx:{item['sme_score']:>5.1f}  "
+                f"RP({get_rp_label(item['rp_score'])}): {item['rp_score']:>5.1f}%  "
+                f"CVD({get_cvd_label(item['cvd_signal'])})  "
+                # ------------------------------------------------------------
+                # f"Trend: {item['trend_score']:>4.1f}  "
+                # f"Positioning: {item['positioning_score']:>4.1f}  "
+                # f"Absorption: {item['absorption_score']:>4.1f}  "
+                # f"SubScore({item['signal_prom']}): {item['fscore']:>5.1f}  "
+                # f"OI({get_oi_label(item['oi'])}): ${format_number(item['oi']):>7}  "
+                # f"OIΔ: {item['oi_delta']:>6.2f}%  "
+                # f"{item['price_direction']} {item['symbol'][:6]:<6} "
+                # f"RSI: {item['rsi']:>5.2f}  "
+                # f"RVOL({get_rvol_label(item['rv'])}): {item['rv']:>4.2f}x  "
+                # f"FUN({get_funding_label(item['funding'])}): {item['funding']:>7.4f}  "
+                # f"OI({get_oi_label(item['oi'])}): ${format_number(item['oi']):>7} "
+                # f"OIΔ: {item['oi_delta']:>6.2f}%  "
+                # f"V24h({item['risk_label']}): ${format_number(item['volume_24h']):>7}  "
+                # f"SCO({item['signal']}): {item['score']:>4.1f}"
             )
 
             print(line1)
@@ -1169,3 +1551,48 @@ def run_scanner():
 if __name__ == "__main__":
     run_scanner()
 
+    # 1. Escenario muy bajista después de una subida
+    # | Métrica              | Valor |
+    # | -------------------- | ----- |
+    # | Bullish Exhaustion   | Alto  |
+    # | Long Trap            | Alto  |
+    # | Reversal Probability | Alto  |
+    # Interpretación:
+    # La subida está agotada.
+    # Los últimos compradores podrían quedar atrapados.
+    # Existe alta probabilidad de giro bajista.
+    # Este es el caso donde los tres pueden subir simultáneamente.
+
+    # 2. Escenario de agotamiento sin trampa
+    # | Métrica              | Valor |
+    # | -------------------- | ----- |
+    # | Bullish Exhaustion   | Alto  |
+    # | Long Trap            | Bajo  |
+    # | Reversal Probability | Medio |
+    # Interpretación:
+    # La tendencia alcista pierde fuerza.
+    # No hay evidencia clara de compradores atrapados.
+    # Puede venir una lateralización en lugar de una caída fuerte.
+
+    # 3. Escenario de trampa temprana
+    # | Métrica              | Valor |
+    # | -------------------- | ----- |
+    # | Bullish Exhaustion   | Medio |
+    # | Long Trap            | Alto  |
+    # | Reversal Probability | Alto  |
+    # Interpretación:
+    # Aún queda energía alcista.
+    # Pero el mercado muestra señales de falsa ruptura.
+    # Hay riesgo de caída aunque el agotamiento no sea extremo.
+
+    # Lectura conjunta práctica
+    # Una forma útil de verlo es:
+
+    # Bullish Exhaustion → "¿La subida se está quedando sin combustible?"
+    # Long Trap → "¿Los compradores recientes están siendo engañados?"
+    # Reversal Probability → "¿Qué tan probable es que cambie la dirección?"
+    # Combinación más potente para detectar techo
+
+    # Bullish Exhaustion > 80
+    # Long Trap > 70
+    # Reversal Probability > 70
