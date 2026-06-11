@@ -417,9 +417,9 @@ def compute_short_score_new(
     return score
 
 
-# =========================
-# score multi-factor + quant system básico
-# =========================
+# ========================================
+# Score multi-factor + quant system básico
+# ========================================
 def compute_short_score(
     rsi,
     funding,
@@ -430,25 +430,30 @@ def compute_short_score(
     bearish_cvd_div,
     price_change_pct_24h,
     symbol,
+    oi_acceleration,
 ):
 
     oi_threshold = get_dynamic_oi_threshold(symbol)
     oi_strength = abs(oi_delta) / max(oi_threshold, 1)
     price_response = price_change_pct_24h / max(abs(oi_delta), 1)
+    oi_vol_ratio = oi / volume_24h
 
-    log_message(
-        f"{symbol} "
-        f"oi_delta={oi_delta:.2f} "
-        f"threshold={oi_threshold:.2f} "
-        f"ratio={oi_delta / oi_threshold:.2f} "
-        f"strength={oi_strength:.2f} "
-        f"price_response={price_response:.3f} "
-        f"price_change_pct={price_change_pct_24h:.3f} "
-    )
-
-    risk_symbol = "NEAR"
+    risk_symbol = "HYPE"
     if symbol == risk_symbol:
-        log_message(f"2.RISK {symbol} score += 1")
+        log_message(
+            f"{symbol}\n"            
+            f"  rsi              = {rsi:.2f}\n"
+            f"  funding          = {funding:.4f}\n"
+            f"  oi_threshold     = {oi_threshold:.2f}\n"
+            f"  oi_strength      = {oi_strength:.2f}\n"
+            f"  price_response   = {price_response:.3f}\n"
+            f"  price_change_pct = {price_change_pct_24h:.3f}\n"
+            f"  oi_acceleration  = {oi_acceleration:.3f}\n"
+            f"  oi               = {oi:.3f}\n"
+            f"  volume_24h       = {volume_24h:.3f}\n"
+            f"  oi_vol_ratio     = {oi_vol_ratio:.3f}\n"
+            f"  oi_delta         = {oi_delta:.2f}\n"
+        )
 
     # =====================
     # 1. LIQUIDITY GATE (FILTRO DURO)
@@ -456,6 +461,8 @@ def compute_short_score(
 
     if volume_24h < 500_000:
         return -5  # basura / no tradear
+        if symbol == risk_symbol:
+            log_message(f"1. LIQ  score -= 5")
 
     score = 0
 
@@ -467,19 +474,27 @@ def compute_short_score(
     # 1 – 2 → Normal / sano / Zona saludable
     # < 1 → Mercado muy activo vs tamaño del OI
 
-    oi_vol_ratio = oi / volume_24h
+    #oi_vol_ratio = oi / volume_24h
 
     if oi_vol_ratio > 5:
         score -= 2  # leverage alto / riesgo / low liquidity
+        if symbol == risk_symbol:
+            log_message(f"2. RISK  score -= 2")
 
     elif oi_vol_ratio > 2:
         score -= 1  # speculative
+        if symbol == risk_symbol:
+            log_message(f"2. RISK  score -= 1")
 
     elif 1 <= oi_vol_ratio <= 2:
         score += 1  # neutral / balanced market
+        if symbol == risk_symbol:
+            log_message(f"2. RISK  score += 1")
 
     else:
         score += 0  # mercado muy activo / alta rotación / flujo agresivo
+        if symbol == risk_symbol:
+            log_message(f"2. RISK  score += 0")
 
     # =====================
     # 3. BIAS (lo más importante)
@@ -488,24 +503,50 @@ def compute_short_score(
     # RSI EXTREMO
     if rsi >= 80:
         score += 5
+        if symbol == risk_symbol:
+            log_message(f"3. BIASr score += 5")
+
     elif rsi >= 75:
         score += 4
+        if symbol == risk_symbol:
+            log_message(f"3. BIASr score += 4")
+
     elif rsi >= 70:
         score += 3
+        if symbol == risk_symbol:
+            log_message(f"3. BIASr score += 3")
+
     elif rsi >= 65:
         score += 1
+        if symbol == risk_symbol:
+            log_message(f"3. BIASr score += 1")
+
     else:
         score -= 1  # no hay sobrecompra real
+        if symbol == risk_symbol:
+            log_message(f"3. BIASr score -= 1")
+
 
     # FUNDING
     if funding > 0.03 and rsi >= 70:
         score += 3  # euforia extrema
+        if symbol == risk_symbol:
+            log_message(f"3. BIASf score += 3")
+
     elif funding > 0.01:
         score += 2
+        if symbol == risk_symbol:
+            log_message(f"3. BIASf score += 2")
+
     elif funding > 0.002:
         score += 1
+        if symbol == risk_symbol:
+            log_message(f"3. BIASf score += 1")
+
     elif funding < -0.02:
         score -= 2  # riesgo de short squeeze
+        if symbol == risk_symbol:
+            log_message(f"3. BIASf score -= 2")
 
     # =====================
     # 4. CONFIRMATION
@@ -514,12 +555,18 @@ def compute_short_score(
     # OI DELTA / POSITIONING STRENGTH
     if oi_strength > 1.0 and rsi >= 75:
         score += 3
+        if symbol == risk_symbol:
+            log_message(f"4. CONFs score += 3")
 
     elif oi_strength > 0.5 and rsi >= 70:
         score += 2
+        if symbol == risk_symbol:
+            log_message(f"4. CONFs score += 2")
 
     elif oi_strength > 0.5 and rsi < 60:
         score += 0
+        if symbol == risk_symbol:
+            log_message(f"4. CONFs score += 0")
 
     # RVOL (CALIBRADO PARA 4h)
     # Agotamiento  0.05 - 0.40
@@ -530,26 +577,36 @@ def compute_short_score(
     # agotamiento extremo
     if rvol < 0.5 and rsi >= 70:
         score += 3
+        if symbol == risk_symbol:
+            log_message(f"4. CONFr score += 3")
 
     # agotamiento moderado
     elif rvol < 0.8 and rsi >= 70:
         score += 2
+        if symbol == risk_symbol:
+            log_message(f"4. CONFr score += 2")
 
     # volumen normal
     elif rvol < 1.2 and rsi >= 70:
         score += 1
+        if symbol == risk_symbol:
+            log_message(f"4. CONFr score += 1")
 
     # mercado caliente
-    elif rvol < 2.0 and rsi >= 70:  # --------------check
+    elif rvol < 2.0 and rsi >= 70:
         score += 0
+        if symbol == risk_symbol:
+            log_message(f"4. CONFr score += 0")
 
     # continuation fuerte
     elif rvol < 3.0 and rsi >= 70:
         score -= 1
+        if symbol == risk_symbol:
+            log_message(f"4. CONFr score -= 1")
 
-    # expansión explosiva # --------------check
+    # expansión explosiva # -----------------------check
     # else:
-    #     score -= 5
+    #     score -= 5 # oi delta > 0
 
     # =====================
     # 5. MOMENTUM EXPANSION
@@ -557,80 +614,116 @@ def compute_short_score(
 
     # expansión saludable / crowding
     if oi_strength > 1.0 and 0.5 <= rvol <= 1.2 and rsi >= 65:
-        score += 0.5
+        score += 1
+        if symbol == risk_symbol:
+            log_message(f"5. MOMEN score += 1")
 
     # momentum peligroso contra short
     if oi_strength > 1.0 and rvol > 2.0:
         score -= 2
+        if symbol == risk_symbol:
+            log_message(f"5. MOMEN score -= 2")
 
     # =====================
-    # 5.5 PRICE EFFICIENCY
+    # 6. PRICE EFFICIENCY
     # =====================
-    # Eficiencia cuánto se mueve el precio
-    # relativo al nuevo positioning (OI)
+    # Eficiencia de cuánto se mueve el precio, relativo al nuevo positioning (OI)
 
-    # Mucha exposición nueva, filtras ruido
-    # Solo analizas eficiencia cuando el positioning realmente importa.
-    # if oi_strength > 1.0:
-    if oi_delta > oi_threshold:
+    # Mucha exposición nueva
+    # Solo analizas eficiencia cuando el positioning realmente importa, filtras ruido
+    if oi_strength > 1.0:
 
         # El deterioro es muy fuerte
         if price_response <= -0.5:
             score += 7
+            if symbol == risk_symbol:
+                log_message(f"6. PRICE score += 7")
 
         # longs atrapados nuevo OI perdiendo dinero
         elif -0.5 < price_response < 0:
             score += 6
+            if symbol == risk_symbol:
+                log_message(f"6. PRICE score += 6")
 
         # Longs entrando pero el precio ya ni responde Absorción fuerte / agotamiento
         # Empieza a entrar mucho OI, pero el precio ya no acelera igual
         elif 0 <= price_response < 0.25:
             score += 4
+            if symbol == risk_symbol:
+                log_message(f"6. PRICE score += 4")
 
         # Agotamiento moderado
         elif 0.25 <= price_response < 0.50:
             score += 2
+            if symbol == risk_symbol:
+                log_message(f"6. PRICE score += 2")
 
         # continuation moderada
-        elif 0.50 <= price_response < 1.0:  # -------------------------------check
+        elif 0.50 <= price_response < 1.0:
             score -= 1
+            if symbol == risk_symbol:
+                log_message(f"6. PRICE score -= 1")
 
         # El precio todavía responde bien al nuevo OI
         # Trend saludable / continuation saludable
         elif 1.0 <= price_response < 2.0:
             score -= 3
+            if symbol == risk_symbol:
+                log_message(f"6. PRICE score -= 3")
 
         # squeeze / expansion agresiva
         elif price_response >= 2.0:
             score -= 5
+            if symbol == risk_symbol:
+                log_message(f"6. PRICE score -= 5")
 
     # =====================
-    # 6. CONTEXT
+    # 7. OI ACELERACION
+    # =====================
+    if oi_delta > 0 and oi_acceleration > 5 and rsi >= 70 and price_response < 0.25:
+        score += 2
+        if symbol == risk_symbol:
+            log_message(f"7. OI ACE score += 2")
+
+    # =====================
+    # 8. CONTEXT
     # =====================
 
     # OI alto SOLO ayuda si hay debilidad
     if oi > 10_000_000 and rsi >= 70 and rvol < 1.2:
         score += 1
+        if symbol == risk_symbol:
+            log_message(f"8. CONT  score += 1")
 
     # OI bajo = manipulable
     if oi < 5_000_000:
         score -= 4
+        if symbol == risk_symbol:
+            log_message(f"8. CONT  score -= 4")
 
     elif oi < 10_000_000:
         score -= 3
+        if symbol == risk_symbol:
+            log_message(f"8. CONT  score -= 3")
 
     elif oi < 20_000_000:
         score -= 2
+        if symbol == risk_symbol:
+            log_message(f"8. CONT  score -= 2")
 
     # Liquidez suficiente
     if volume_24h > 1_000_000:
-        score += 0.5
+        score += 1
+        if symbol == risk_symbol:
+            log_message(f"8. CONT  score += 1")
 
     # =====================
-    # 7. CVD DIVERGENCE
+    # 9. CVD DIVERGENCE
     # =====================
     if bearish_cvd_div < 0 and rsi >= 70:
         score += 2
+        if symbol == risk_symbol:
+            log_message(f"9. CVD   score += 2")
 
     return round(score, 1)
 
@@ -1343,6 +1436,29 @@ def get_rp_label(score):
     return "🔴"
 
 
+def get_oi_acceleration(symbol, current_oi_delta):
+
+    cursor.execute(
+        """
+        SELECT oi_delta
+        FROM scanner_history
+        WHERE symbol = ?
+        ORDER BY timestamp DESC
+        LIMIT 5
+        """,
+        (symbol,),
+    )
+
+    rows = cursor.fetchall()
+
+    if len(rows) < 3:
+        return 0
+
+    avg_previous = np.mean([r[0] for r in rows])
+
+    return current_oi_delta - avg_previous
+
+
 # =========================
 # Scanner principal
 # =========================
@@ -1408,6 +1524,8 @@ def run_scanner():
 
             score = market_data.get(symbol, {}).get("score", 0)
 
+            oi_acceleration = get_oi_acceleration(symbol, oi_delta)
+
             score2 = compute_short_score_new(
                 rsi,
                 funding,
@@ -1418,6 +1536,19 @@ def run_scanner():
                 cvd_signal,
                 price_change_pct,
                 symbol,
+            )
+
+            score3 = compute_short_score(
+                rsi,
+                funding,
+                oi,
+                oi_delta,
+                rv,
+                volume_24h,
+                cvd_signal,
+                price_change_pct,
+                symbol,
+                oi_acceleration,
             )
 
             be_score = bullish_exhaustion_score(rsi, rv, price_change_pct, efficiency)
@@ -1518,7 +1649,7 @@ def run_scanner():
                 f"PX:{item['price']:>7.2f}  "
                 # f"RSI: {item['rsi']:>5.2f}  "
                 f"SCO({item['signal']}):{item['score']:>5.1f}  "
-                # f"Scol({item['signal2']}):{item['score2']:>5.1f}  "
+                #f"SLI({item['signal2']}):{item['score2']:>5.1f}  "
                 f"BE({get_be_label(item['be_score'])}): {item['be_score']:>5.1f}%  "
                 # f"SO({get_so_label(item['so_score'])}): {item['so_score']:>5.1f}%  "
                 # f"DI:{item['di_score']:>5.1f}  "

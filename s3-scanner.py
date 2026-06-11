@@ -12,9 +12,16 @@ import json
 LOG_FILE = "zshort_scanner.log"
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--rsi", type=float, default=70)
+parser.add_argument("--rsi", type=float, default=40)
+
+# parser.add_argument("--symbol", type=str, default=None)
+parser.add_argument("--symbols", nargs="+", type=str, default=None)
+
 args = parser.parse_args()
 RSI_THRESHOLD = args.rsi
+
+# SYMBOL = args.symbol.upper() if args.symbol else None
+SYMBOLS = [s.upper() for s in args.symbols] if args.symbols else None
 
 BASE_URL = "https://api.hyperliquid.xyz/info"
 RSI_PERIOD = 14
@@ -74,6 +81,7 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     funding REAL,
     oi REAL,
     oi_delta REAL,
+    oi_acceleration REAL,
     oi_threshold REAL,
     oi_strength  REAL,
     efficiency REAL,
@@ -258,7 +266,26 @@ def cleanup_old_data():
 # =========================
 # Obtener mercados
 # =========================
-def get_markets():
+# def get_markets():
+#     payload = {"type": "meta"}
+
+#     r = requests.post(BASE_URL, json=payload)
+#     data = r.json()
+
+#     if "universe" not in data:
+#         print("Error: respuesta inválida del API, falta 'universe'")
+#         return []
+
+#     return [asset["name"] for asset in data["universe"]]
+
+
+# =========================
+# Obtener mercados
+# =========================
+def get_markets(symbols=None):
+    if symbols:
+        return symbols
+
     payload = {"type": "meta"}
 
     r = requests.post(BASE_URL, json=payload)
@@ -269,6 +296,25 @@ def get_markets():
         return []
 
     return [asset["name"] for asset in data["universe"]]
+
+
+# =========================
+# Obtener mercados
+# =========================
+# def get_markets(symbol=None):
+#     if symbol:
+#         return [symbol]
+
+#     payload = {"type": "meta"}
+
+#     r = requests.post(BASE_URL, json=payload)
+#     data = r.json()
+
+#     if "universe" not in data:
+#         print("Error: respuesta inválida del API, falta 'universe'")
+#         return []
+
+#     return [asset["name"] for asset in data["universe"]]
 
 
 # =========================
@@ -491,11 +537,22 @@ def compute_short_score(
     bearish_cvd_div,
     price_change_pct_24h,
     symbol,
+    oi_acceleration,
 ):
 
     oi_threshold = get_dynamic_oi_threshold(symbol)
     oi_strength = abs(oi_delta) / max(oi_threshold, 1)
     price_response = price_change_pct_24h / max(abs(oi_delta), 1)
+
+    log_message(
+        f"{symbol} "
+        f"oi_delta={oi_delta:.2f} "
+        f"threshold={oi_threshold:.2f} "
+        f"strength={oi_strength:.2f} "
+        f"price_response={price_response:.3f} "
+        f"price_change_pct={price_change_pct_24h:.3f} "
+        f"oi_acceleration={oi_acceleration:.3f} "
+    )
 
     # =====================
     # 1. LIQUIDITY GATE (FILTRO DURO)
@@ -587,16 +644,16 @@ def compute_short_score(
         score += 1
 
     # mercado caliente
-    elif rvol < 2.0 and rsi >= 70:  # --------------check
+    elif rvol < 2.0 and rsi >= 70:
         score += 0
 
     # continuation fuerte
     elif rvol < 3.0 and rsi >= 70:
         score -= 1
 
-    # expansión explosiva # --------------check
-    # else:
-    #     score -= 5
+    # expansión explosiva
+    else:
+        score -= 2
 
     # =====================
     # 5. MOMENTUM EXPANSION
@@ -604,32 +661,20 @@ def compute_short_score(
 
     # expansión saludable / crowding
     if oi_strength > 1.0 and 0.5 <= rvol <= 1.2 and rsi >= 65:
-        score += 0.5
+        score += 1
 
     # momentum peligroso contra short
     if oi_strength > 1.0 and rvol > 2.0:
         score -= 2
 
     # =====================
-    # 5.5 PRICE EFFICIENCY
+    # 6. PRICE EFFICIENCY
     # =====================
-    # Eficiencia cuánto se mueve el precio
-    # relativo al nuevo positioning (OI)
+    # Eficiencia de cuánto se mueve el precio, relativo al nuevo positioning (OI)
 
-    log_message(
-        f"{symbol} "
-        f"oi_delta={oi_delta:.2f} "
-        f"threshold={oi_threshold:.2f} "
-        f"ratio={oi_delta / oi_threshold:.2f} "
-        f"strength={oi_strength:.2f} "
-        f"price_response={price_response:.3f} "
-        f"price_change_pct={price_change_pct_24h:.3f} "
-    )
-
-    # Mucha exposición nueva, filtras ruido
-    # Solo analizas eficiencia cuando el positioning realmente importa.
-    # if oi_strength > 1.0:
-    if oi_delta > oi_threshold:
+    # Mucha exposición nueva
+    # Solo analizas eficiencia cuando el positioning realmente importa, filtras ruido
+    if oi_strength > 1.0:
 
         # El deterioro es muy fuerte
         if price_response <= -0.5:
@@ -649,7 +694,7 @@ def compute_short_score(
             score += 2
 
         # continuation moderada
-        elif 0.50 <= price_response < 1.0:  # -------------------------------check
+        elif 0.50 <= price_response < 1.0:
             score -= 1
 
         # El precio todavía responde bien al nuevo OI
@@ -662,7 +707,13 @@ def compute_short_score(
             score -= 5
 
     # =====================
-    # 6. CONTEXT
+    # 7. OI ACELERACION
+    # =====================
+    if oi_delta > 0 and oi_acceleration > 5 and rsi >= 70 and price_response < 0.25:
+        score += 2
+
+    # =====================
+    # 8. CONTEXT
     # =====================
 
     # OI alto SOLO ayuda si hay debilidad
@@ -681,10 +732,10 @@ def compute_short_score(
 
     # Liquidez suficiente
     if volume_24h > 1_000_000:
-        score += 0.5
+        score += 1
 
     # =====================
-    # 7. CVD DIVERGENCE
+    # 9. CVD DIVERGENCE
     # =====================
     if bearish_cvd_div < 0 and rsi >= 70:
         score += 2
@@ -882,7 +933,9 @@ def get_risk_label(oi, volume_24h):
 
 
 def get_funding_label(funding):
-    if funding > 0:
+    if funding >= 0.01:
+        return "🚀"
+    elif funding >= 0:
         return "🟢"
     else:
         return "🔴"
@@ -920,12 +973,12 @@ def get_rvol_label(rvol):
     return "🟢"
 
 
-# def update_market_data(symbol, rsi, rvol, oi_delta, oi_threshold, oi_strength):
 def update_market_data(
     symbol,
     rsi,
     rvol,
     oi_delta,
+    oi_acceleration,
     oi_threshold,
     oi_strength,
     price_response,
@@ -940,6 +993,7 @@ def update_market_data(
             rsi = ?,
             rvol = ?,
             oi_delta = ?,
+            oi_acceleration = ?,
             oi_threshold = ?,
             oi_strength = ?,
             efficiency = ?,
@@ -957,6 +1011,7 @@ def update_market_data(
             rsi,
             rvol,
             oi_delta,
+            oi_acceleration,
             oi_threshold,
             oi_strength,
             price_response,
@@ -1000,14 +1055,76 @@ def get_price_change_hours(symbol, current_price, hours=4):
 
 
 # =========================
+# obtener el oi_delta previo
+# =========================
+def get_previous_oi_delta(symbol):
+
+    cursor.execute(
+        """
+        SELECT oi_delta
+        FROM scanner_history
+        WHERE symbol = ?
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (symbol,),
+    )
+
+    row = cursor.fetchone()
+
+    if not row:
+        return None
+
+    return row[0]
+
+
+def get_oi_acceleration(symbol, current_oi_delta):
+
+    cursor.execute(
+        """
+        SELECT oi_delta
+        FROM scanner_history
+        WHERE symbol = ?
+        ORDER BY timestamp DESC
+        LIMIT 5
+        """,
+        (symbol,),
+    )
+
+    rows = cursor.fetchall()
+
+    if len(rows) < 3:
+        return 0
+
+    avg_previous = np.mean([r[0] for r in rows])
+
+    return current_oi_delta - avg_previous
+
+
+# =========================
+# Calcular aceleración oi
+# =========================
+def calculate_oi_acceleration(symbol, current_oi_delta):
+
+    previous_oi_delta = get_previous_oi_delta(symbol)
+
+    if previous_oi_delta is None:
+        return 0
+
+    return current_oi_delta - previous_oi_delta
+
+
+# =========================
 # Scanner principal
 # =========================
 def run_scanner():
 
     cleanup_old_data()
 
-    markets = get_markets()
+    # markets = get_markets()
     # markets = get_markets_from_json()
+    #markets = get_markets(SYMBOL)
+    markets = get_markets(SYMBOLS)
 
     market_data = get_market_data()
     save_market_data(market_data)
@@ -1056,6 +1173,14 @@ def run_scanner():
 
             oi_delta = get_oi_delta(symbol, oi)
 
+            # -----------------------
+
+            # oi_acceleration = calculate_oi_acceleration(symbol, oi_delta)
+
+            oi_acceleration = get_oi_acceleration(symbol, oi_delta)
+
+            # -----------------------
+
             save_oi_snapshot(symbol, oi)
 
             oi_threshold = get_dynamic_oi_threshold(symbol)
@@ -1084,6 +1209,7 @@ def run_scanner():
                 cvd_signal,
                 price_change_pct,
                 symbol,
+                oi_acceleration,
             )
 
             price_response = price_change_pct / max(abs(oi_delta), 1)
@@ -1093,6 +1219,7 @@ def run_scanner():
                 rsi,
                 rv,
                 oi_delta,
+                oi_acceleration,
                 oi_threshold,
                 oi_strength,
                 price_response,
@@ -1160,10 +1287,10 @@ def run_scanner():
                 f"RSI: {item['rsi']:>5.2f}  "
                 f"RVOL({get_rvol_label(item['rv'])}): {item['rv']:>4.2f}x  "
                 f"FUN({get_funding_label(item['funding'])}): {item['funding']:>7.4f}  "
-                f"OI({get_oi_label(item['oi'])}): ${format_number(item['oi']):>7} "
+                f"OI({get_oi_label(item['oi'])}): ${format_number(item['oi']):>7}  "
                 f"OIΔ: {item['oi_delta']:>6.2f}%  "
                 f"V24h({item['risk_label']}): ${format_number(item['volume_24h']):>7}  "
-                f"SCO({item['signal']}): {item['score']:>4.1f}"
+                f"SCO({item['signal']}): {item['score']:>2}  "
             )
 
             print(line1)

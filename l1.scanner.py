@@ -10,6 +10,7 @@ from ta.momentum import RSIIndicator
 import time
 import argparse
 import sqlite3
+from tabulate import tabulate
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--rsi", type=float, default=30)
@@ -441,7 +442,7 @@ def get_cvd_label(cvd_div):
 # =========================
 def run_scanner():
 
-    cleanup_old_data()
+    #cleanup_old_data()
 
     markets = get_markets()
 
@@ -536,13 +537,13 @@ def run_scanner():
         for item in results:
 
             print(
-                f"{item['symbol']:<6} "
+                f"{item['symbol']:<7} "
                 f"RSI: {item['rsi']:>5.2f}  "
-                f"Fund({get_funding_label(item['funding'])}): {item['funding']:>7.4f}  "
+                f"RVOL: {item['rv']:>4.2f}x  "
+                #f"Fund({get_funding_label(item['funding'])}): {item['funding']:>7.4f}  "
                 f"CVD({get_cvd_label(item['cvd_div'])}) "
                 f"OI: ${format_number(item['oi']):>7}  "
-                f"OIΔ: {item['oi_delta']:>5.2f}%  "
-                f"RVOL: {item['rv']:>4.2f}x  "
+                #f"OIΔ: {item['oi_delta']:>5.2f}%  "
                 f"Vol24h({item['risk_label']}): ${format_number(item['volume_24h']):>7}  "
                 f"SCO({item['signal']}): {item['score']:>4.1f}"
             )
