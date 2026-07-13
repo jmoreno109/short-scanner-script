@@ -10,10 +10,9 @@ from ta.momentum import RSIIndicator
 import time
 import argparse
 import sqlite3
-from tabulate import tabulate
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--rsi", type=float, default=30)
+parser.add_argument("--rsi", type=float, default=50)
 args = parser.parse_args()
 
 RSI_THRESHOLD = args.rsi
@@ -437,12 +436,20 @@ def get_cvd_label(cvd_div):
     return "🔴"
 
 
+def get_oi_label(oi):
+    if oi < 5_000_000:  # muy manipulable
+        return "🔴"
+    elif oi < 20_000_000:  # speculative
+        return "🟡"
+    return "🟢"  # más estable
+
+
 # =========================
 # MAIN SCANNER
 # =========================
 def run_scanner():
 
-    #cleanup_old_data()
+    # cleanup_old_data()
 
     markets = get_markets()
 
@@ -501,7 +508,8 @@ def run_scanner():
 
             risk_label = get_risk_label(oi, volume_24h)
 
-            if rsi < RSI_THRESHOLD and oi > 0:
+            # if rsi < RSI_THRESHOLD and oi > 0:
+            if rsi < RSI_THRESHOLD and oi > 0 and score > 2:
 
                 results.append(
                     {
@@ -537,13 +545,15 @@ def run_scanner():
         for item in results:
 
             print(
-                f"{item['symbol']:<7} "
+                f"{item['symbol'][:6]:<6}  "
                 f"RSI: {item['rsi']:>5.2f}  "
                 f"RVOL: {item['rv']:>4.2f}x  "
-                #f"Fund({get_funding_label(item['funding'])}): {item['funding']:>7.4f}  "
-                f"CVD({get_cvd_label(item['cvd_div'])}) "
-                f"OI: ${format_number(item['oi']):>7}  "
-                #f"OIΔ: {item['oi_delta']:>5.2f}%  "
+                f"Fund({get_funding_label(item['funding'])}): {item['funding']:>7.4f}  "
+                # f"FUND: {item['funding']:>7.4f}  "
+                # f"CVD({get_cvd_label(item['cvd_div'])}) "
+                # f"OI: ${format_number(item['oi']):>7}  "
+                f"OI({get_oi_label(item['oi'])}): ${format_number(item['oi']):>7}  "
+                f"OIΔ:{item['oi_delta']:>6.2f}%  "
                 f"Vol24h({item['risk_label']}): ${format_number(item['volume_24h']):>7}  "
                 f"SCO({item['signal']}): {item['score']:>4.1f}"
             )

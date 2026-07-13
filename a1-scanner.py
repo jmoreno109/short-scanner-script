@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 from textwrap import dedent
 import argparse
-from tabulate import tabulate
 
 
 class HyperliquidAnalyzer:

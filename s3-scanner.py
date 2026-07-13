@@ -299,25 +299,6 @@ def get_markets(symbols=None):
 
 
 # =========================
-# Obtener mercados
-# =========================
-# def get_markets(symbol=None):
-#     if symbol:
-#         return [symbol]
-
-#     payload = {"type": "meta"}
-
-#     r = requests.post(BASE_URL, json=payload)
-#     data = r.json()
-
-#     if "universe" not in data:
-#         print("Error: respuesta inválida del API, falta 'universe'")
-#         return []
-
-#     return [asset["name"] for asset in data["universe"]]
-
-
-# =========================
 # Obtener mercados desde archivo local JSON
 # =========================
 def get_markets_from_json():
@@ -574,16 +555,16 @@ def compute_short_score(
     oi_vol_ratio = oi / volume_24h
 
     if oi_vol_ratio > 5:
-        score -= 2  # leverage alto / riesgo / low liquidity
+        score -= 2  # riesgo / low liquidity / Baja rotación y mercado muy quieto
 
     elif oi_vol_ratio > 2:
-        score -= 1  # speculative
+        score -= 1  # speculative / Rotación baja, señales menos fiables
 
     elif 1 <= oi_vol_ratio <= 2:
-        score += 1  # neutral / balanced market
+        score += 1  # neutral / balanced market / Buena actividad, contexto saludable
 
     else:
-        score += 0  # mercado muy activo / alta rotación / flujo agresivo
+        score += 0  # mercado muy activo / flujo agresivo / Mucha rotación, necesita confirmación con OIΔ
 
     # =====================
     # 3. BIAS (lo más importante)
@@ -602,11 +583,11 @@ def compute_short_score(
         score -= 1  # no hay sobrecompra real
 
     # FUNDING
-    if funding > 0.03 and rsi >= 70:
+    if funding >= 0.03 and rsi >= 70:
         score += 3  # euforia extrema
-    elif funding > 0.01:
+    elif funding >= 0.01:
         score += 2
-    elif funding > 0.002:
+    elif funding >= 0.002:
         score += 1
     elif funding < -0.02:
         score -= 2  # riesgo de short squeeze
@@ -678,16 +659,16 @@ def compute_short_score(
 
         # El deterioro es muy fuerte
         if price_response <= -0.5:
-            score += 7
+            score += 5
 
         # longs atrapados nuevo OI perdiendo dinero
         elif -0.5 < price_response < 0:
-            score += 6
+            score += 4
 
         # Longs entrando pero el precio ya ni responde Absorción fuerte / agotamiento
         # Empieza a entrar mucho OI, pero el precio ya no acelera igual
         elif 0 <= price_response < 0.25:
-            score += 4
+            score += 3
 
         # Agotamiento moderado
         elif 0.25 <= price_response < 0.50:
@@ -933,10 +914,12 @@ def get_risk_label(oi, volume_24h):
 
 
 def get_funding_label(funding):
-    if funding >= 0.01:
+    if funding >= 0.02:
         return "🚀"
-    elif funding >= 0:
+    elif funding >= 0.01:
         return "🟢"
+    elif funding >= 0:
+        return "🟡"
     else:
         return "🔴"
 
@@ -1101,6 +1084,69 @@ def get_oi_acceleration(symbol, current_oi_delta):
     return current_oi_delta - avg_previous
 
 
+def get_oi_delta_label(oi, oi_delta):
+    # oi en USD
+    if oi >= 1_000_000_000:
+        if oi_delta >= 5:
+            return "🟢"
+        elif oi_delta >= 2:
+            return "🟡"
+        else:
+            return "🔴"
+
+    elif oi >= 500_000_000:
+        if oi_delta >= 8:
+            return "🟢"
+        elif oi_delta >= 3:
+            return "🟡"
+        else:
+            return "🔴"
+
+    elif oi >= 100_000_000:
+        if oi_delta >= 10:
+            return "🟢"
+        elif oi_delta >= 5:
+            return "🟡"
+        else:
+            return "🔴"
+
+    elif oi >= 20_000_000:
+        if oi_delta >= 15:
+            return "🟢"
+        elif oi_delta >= 8:
+            return "🟡"
+        else:
+            return "🔴"
+
+    else:
+        if oi_delta >= 20:
+            return "🟢"
+        elif oi_delta >= 12:
+            return "🟡"
+        else:
+            return "🔴"
+
+
+def get_efficiency_label(price_response):
+    if price_response <= -1:  # -0.5 Colapso de eficiencia (setup excelente para short)
+        return "🔻"  # "💥"
+
+    elif price_response < 0:  # Muy bajista
+        return "🔻"
+
+    elif price_response < 0.25:  # Agotamiento fuerte
+        return "➖"
+
+    elif price_response < 1.0:  # Neutral / transición
+        return "➖"
+
+    elif price_response < 2.0:  # Continuación saludable
+        return "🟢"
+
+    else:
+        return "🟢"  # "🚀" "🟢" Expansión explosiva (evitar shorts)
+
+
 # =========================
 # Calcular aceleración oi
 # =========================
@@ -1112,7 +1158,7 @@ def calculate_oi_acceleration(symbol, current_oi_delta):
         return 0
 
     return current_oi_delta - previous_oi_delta
-
+    
 
 # =========================
 # Scanner principal
@@ -1123,7 +1169,7 @@ def run_scanner():
 
     # markets = get_markets()
     # markets = get_markets_from_json()
-    #markets = get_markets(SYMBOL)
+    # markets = get_markets(SYMBOL)
     markets = get_markets(SYMBOLS)
 
     market_data = get_market_data()
@@ -1173,13 +1219,7 @@ def run_scanner():
 
             oi_delta = get_oi_delta(symbol, oi)
 
-            # -----------------------
-
-            # oi_acceleration = calculate_oi_acceleration(symbol, oi_delta)
-
             oi_acceleration = get_oi_acceleration(symbol, oi_delta)
-
-            # -----------------------
 
             save_oi_snapshot(symbol, oi)
 
@@ -1263,6 +1303,7 @@ def run_scanner():
                         "cvd_div": cvd_signal,
                         "price_direction": price_direction,
                         "price": price,
+                        "price_response": price_response,
                     }
                 )
 
@@ -1283,14 +1324,17 @@ def run_scanner():
         for item in results:
 
             line1 = (
-                f"{item['price_direction']} {item['symbol'][:6]:<6} "
+                f"{item['price_direction']} {item['symbol'][:4]:<4}  "
                 f"RSI: {item['rsi']:>5.2f}  "
                 f"RVOL({get_rvol_label(item['rv'])}): {item['rv']:>4.2f}x  "
-                f"FUN({get_funding_label(item['funding'])}): {item['funding']:>7.4f}  "
-                f"OI({get_oi_label(item['oi'])}): ${format_number(item['oi']):>7}  "
-                f"OIΔ: {item['oi_delta']:>6.2f}%  "
-                f"V24h({item['risk_label']}): ${format_number(item['volume_24h']):>7}  "
-                f"SCO({item['signal']}): {item['score']:>2}  "
+                f"FUN({get_funding_label(item['funding'])}):{item['funding']:>7.4f}  "
+                f"OI({get_oi_label(item['oi'])}):${format_number(item['oi']):>7}  "
+                # f"OIΔ: {item['oi_delta']:>6.2f}%  "
+                f"OIΔ({get_oi_delta_label(item['oi'],item['oi_delta'])}):{item['oi_delta']:>6.2f}%  "
+                f"V24h({item['risk_label']}):${format_number(item['volume_24h']):>7}  "
+                # f"E({get_efficiency_label(item['price_response'])}) "
+                # f"S({item['signal']}):{item['score']:>2}"
+                f"E/S({get_efficiency_label(item['price_response'])}|{item['signal']}):{item['score']:>2}"
             )
 
             print(line1)
@@ -1307,3 +1351,12 @@ if __name__ == "__main__":
     #     except Exception as e:
     #         print(e)
     #     time.sleep(1200)
+
+
+# | OI actual | OIΔ que empieza a ser interesante |
+# | --------: | --------------------------------: |
+# |      > 1B |                               +2% |
+# |   500M–1B |                               +3% |
+# | 100M–500M |                               +5% |
+# |  20M–100M |                               +8% |
+# |     < 20M |                              +12% |
